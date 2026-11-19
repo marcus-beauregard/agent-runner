@@ -14,7 +14,7 @@ Swap the mock LLM for a real client to go live. Defaults matter: step caps, a co
 
 | Layer | What it is | Where |
 |---|---|---|
-| **Runtime** | the loop, the tools, the transcript | `src/agent.js`, `src/tools.js` |
+| **Runtime** | the loop, the tools, the transcript | `internal/agent`, `internal/tools` |
 | **Worker** | a job on top of it: issue → patch → gate → review → PR | specified in [PRD.md](PRD.md) |
 
 The runtime works today. The worker is a specification with the hard dependency already met.
@@ -22,12 +22,20 @@ The runtime works today. The worker is a specification with the hard dependency 
 ## Run it
 
 ```bash
-npm install          # no dependencies; this only writes the lockfile if you add one
-npm test             # node --test, 8 cases
-node src/index.js "List the files in this project"
+go build -o agent-runner ./cmd/agent-runner
+./agent-runner run "List the files in this project"
+go test -race ./...
+```
+
+Or install the binary directly:
+
+```bash
+go install github.com/marcus-beauregard/agent-runner/cmd/agent-runner@latest
 ```
 
 The default entry point runs offline against a deterministic mock planner, so every run is reproducible and reviewable without a key.
+
+The npm package `@marcus.beauregard/agent-runner` 1.0.0 is the historical JavaScript implementation. v2 is Go and ships as a binary; it is not republished to npm.
 
 ## The worker, in one command
 
@@ -55,9 +63,10 @@ Full requirements, contracts, refusals and milestones: [PRD.md](PRD.md).
 
 | | |
 |---|---|
-| Runtime loop | working (mock planner) |
+| Runtime loop | working in Go (mock planner) |
 | Tool registry + hardened command runner | working, tested |
-| Worker: fetch / scope / reproduce / gate / review / commit / PR | specified, not built |
+| Worker: `work --dry-run` | built — prints the plan and the gate, writes nothing |
+| Worker: fetch / reproduce / gate / review / commit / PR | specified, not built |
 
 Next milestone: `work --dry-run` against a real issue — it prints the plan and the gate it would run, and writes nothing.
 

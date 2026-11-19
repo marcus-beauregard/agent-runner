@@ -88,8 +88,8 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 
 | Piece | State |
 |---|---|
-| Step-capped loop, transcript, tool registry | **done** — `src/agent.js`, `src/tools.js` |
-| argv-only command runner, flag allowlist, workdir confinement | **done** — hardened in `e2cedda`, 8 tests |
+| Step-capped loop, transcript, tool registry | **done** — `internal/agent`, `internal/tools` (Go) |
+| argv-only command runner, flag allowlist, workdir confinement | **done** — Go port, race-tested, symlink escapes covered |
 | Real LLM client | **missing** — the loop runs on a deterministic mock |
 | `gh` integration (issue read, PR create) | **missing** — host steps today |
 | git operations (branch, commit, push) | **missing** |

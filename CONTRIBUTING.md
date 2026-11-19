@@ -14,12 +14,12 @@ Thanks for looking. One person maintains this, and it is deliberately small — 
 ~~~bash
 git clone https://github.com/marcus-beauregard/agent-runner.git
 cd agent-runner
-npm install && npm test
+go build ./... && go test -race ./...
 ~~~
 
 ## Tests
 
-**npm install && npm test** — the suite is small on purpose. A behaviour change comes with a test, or with a manual repro written into the PR.
+**go test -race ./...** — the suite is small on purpose. `gofmt -l .` and `go vet ./...` must also be clean; CI checks all three. A behaviour change comes with a test, or with a manual repro written into the PR.
 
 ## Commit style
 
