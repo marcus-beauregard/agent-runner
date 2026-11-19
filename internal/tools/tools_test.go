@@ -1,0 +1,271 @@
+package tools
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// newRegistry builds a Registry rooted in a fresh temp directory with the
+// fixtures the ported tests expect.
+func newRegistry(t *testing.T) *Registry {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"package.json": "{\n  \"name\": \"agent-runner\"\n}\n",
+		"README.md":    "agent-runner\n",
+		"inside.txt":   "inside",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func run(t *testing.T, r *Registry, cmd string) (string, error) {
+	t.Helper()
+	return r.Run(context.Background(), "run_command", map[string]any{"command": cmd})
+}
+
+func wantErr(t *testing.T, err error, substr string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", substr)
+	}
+	if !strings.Contains(err.Error(), substr) {
+		t.Fatalf("expected error containing %q, got %q", substr, err.Error())
+	}
+}
+
+func TestRefusesShellChaining(t *testing.T) {
+	r := newRegistry(t)
+	for _, c := range []string{
+		"ls; cat /etc/passwd",
+		"ls && cat /etc/passwd",
+		"cat package.json | wc -l",
+		"ls $(id)",
+		"ls `id`",
+		"cat package.json > out.txt",
+	} {
+		_, err := run(t, r, c)
+		wantErr(t, err, "shell syntax is not supported")
+	}
+}
+
+func TestRefusesInterpreters(t *testing.T) {
+	r := newRegistry(t)
+	_, err := run(t, r, `node -e "require('fs')"`)
+	wantErr(t, err, "command not allowed: node")
+	_, err = run(t, r, `python3 -c "print(1)"`)
+	wantErr(t, err, "command not allowed: python3")
+}
+
+func TestRefusesLauncherFlags(t *testing.T) {
+	r := newRegistry(t)
+	for _, c := range []struct{ cmd, msg string }{
+		{"git -c core.pager=cat log", "git: subcommand not allowed"},
+		{"git log --exec-path=/tmp", "argument not allowed"},
+		{"cat -n package.json", "cat: argument not allowed: -n"},
+		{"ls --color=always", "ls: argument not allowed"},
+	} {
+		_, err := run(t, r, c.cmd)
+		wantErr(t, err, c.msg)
+	}
+}
+
+func TestRefusesPathsOutside(t *testing.T) {
+	r := newRegistry(t)
+	_, err := run(t, r, "cat /etc/passwd")
+	wantErr(t, err, "path escapes the working directory")
+	_, err = run(t, r, "cat ../../etc/passwd")
+	wantErr(t, err, "path escapes the working directory")
+}
+
+func TestRefusesControlCharacters(t *testing.T) {
+	r := newRegistry(t)
+	_, err := run(t, r, "ls\ncat package.json")
+	wantErr(t, err, "invalid character in command")
+	_, err = run(t, r, "cat \"line\nfeed\"")
+	wantErr(t, err, "invalid character in command")
+}
+
+func TestRefusesSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "inside.txt"), []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "secret.txt"), filepath.Join(work, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = run(t, r, "cat link.txt")
+	wantErr(t, err, "path escapes the working directory")
+	out, err := run(t, r, "cat inside.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "inside" {
+		t.Fatalf("got %q, want %q", out, "inside")
+	}
+}
+
+// gitRun runs git as an argv array for test setup only — the allowlist is what
+// is under test, not the fixture.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
+// newGitRegistry returns a Registry rooted in a committed git repository.
+func newGitRegistry(t *testing.T) *Registry {
+	t.Helper()
+	dir := t.TempDir()
+	gitRun(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("agent-runner\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte("{\n  \"name\": \"agent-runner\"\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", ".")
+	gitRun(t, dir, "commit", "-q", "-m", "init")
+	r, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestRunsAllowlisted(t *testing.T) {
+	r := newGitRegistry(t)
+
+	out, err := run(t, r, "ls -1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "package.json") {
+		t.Fatalf("ls -1 output %q lacks package.json", out)
+	}
+
+	out, err = run(t, r, "wc -l package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := strings.TrimLeft(out, " \t\r\n"); s == "" || s[0] < '0' || s[0] > '9' {
+		t.Fatalf("wc -l output %q does not start with a count", out)
+	}
+
+	if _, err = run(t, r, "git status --short"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err = run(t, r, `cat "package.json"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "agent-runner") {
+		t.Fatalf("cat output %q lacks agent-runner", out)
+	}
+}
+
+func TestRefusesGitOperandsOutside(t *testing.T) {
+	r := newGitRegistry(t)
+	_, err := run(t, r, "git status /etc/passwd")
+	wantErr(t, err, "path escapes the working directory")
+	_, err = run(t, r, "git diff ../../outside")
+	wantErr(t, err, "path escapes the working directory")
+	out, err := run(t, r, "git show HEAD:README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "agent-runner") {
+		t.Fatalf("git show output %q lacks agent-runner", out)
+	}
+}
+
+// read_file and write_file must be confined by the same function as
+// run_command. These tests cover the gap that existed in the JavaScript port.
+func TestReadWriteFileConfinement(t *testing.T) {
+	r := newRegistry(t)
+
+	_, err := r.Run(context.Background(), "read_file", map[string]any{"path": "/etc/passwd"})
+	wantErr(t, err, "path escapes the working directory")
+	_, err = r.Run(context.Background(), "write_file", map[string]any{"path": "../out.txt", "content": "x"})
+	wantErr(t, err, "path escapes the working directory")
+
+	out, err := r.Run(context.Background(), "write_file", map[string]any{"path": "new.txt", "content": "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "wrote new.txt" {
+		t.Fatalf("write_file returned %q", out)
+	}
+	out, err = r.Run(context.Background(), "read_file", map[string]any{"path": "new.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "hello" {
+		t.Fatalf("read_file returned %q, want %q", out, "hello")
+	}
+}
+
+func TestReadFileRefusesSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "secret.txt"), filepath.Join(work, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Run(context.Background(), "read_file", map[string]any{"path": "link.txt"})
+	wantErr(t, err, "path escapes the working directory")
+}
+
+func TestReadFileRefusesLarge(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), make([]byte, 2*1024*1024+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Run(context.Background(), "read_file", map[string]any{"path": "big.txt"})
+	wantErr(t, err, "too large")
+}
