@@ -21,98 +21,82 @@ The second problem is what happens after the PR exists. A review arrives, or CI 
 3. **An agent.** Something with no hands calls the CLI, reads machine output, and decides what to do next.
 4. **Anyone reading the repo.** If the process is in the PRD and the code, the tool is legible without watching me work.
 
-## 3. One entry point, two drivers
+## 3. Three commands, and nothing that stays running
 
-There is one way to do work and one way to find it. Everything else is a route inside `pass`.
+This binary reads and writes. It does not poll, watch, loop, retry on a timer, or hold a lock between runs. One invocation, one pipeline, one exit.
 
 ```
-agent-runner pass <url> --repo <path> [--dry-run] [--force <pipeline>] [--gate <cmd> ...] [--json]
-agent-runner watch --repo <path> --pr <url> [--issue <url>] [--interval 60s] [--for 30m | --once] [--json]
+agent-runner build   <issue-url> --repo <path> [--gate <cmd> ...] [--json]
+agent-runner resolve <pr-url>    --repo <path> [--gate <cmd> ...] [--max-attempts 3] [--json]
+agent-runner amend   <pr-url>    --repo <path> [--issue <url>] [--gate <cmd> ...] [--json]
 ```
 
-Every invocation does one job and exits. Nothing here schedules itself.
+Each answers one question:
 
-### `pass` — one thread, one route
+- **`build`** — can this issue become something a maintainer will review?
+- **`resolve`** — is there anything left in this review that we owe an answer to?
+- **`amend`** — has the issue moved since the PR was written, and does the patch still stand?
 
-The unit of work is a **thread**: an issue and the pull requests that reference it, together with what the ledger already knows about them. `pass` takes any URL inside that thread and resolves the whole thing, because work on one end invalidates the other. A maintainer answering the issue changes what an open PR should say; a review on the PR can make the issue's original ask obsolete.
+Nothing chooses which of the three to run. That is the caller's job, and the reason this stays a set of commands rather than a framework: scheduling, polling, queues, leases and work-in-progress limits belong to whatever sits above this and knows what it wants to spend.
 
-The subject is whatever the URL points at. The pipeline is chosen by what changed since the ledger last looked, not by the URL type:
+### The thread is the unit, even for one command
 
-| Thread state, newer than the ledger | Pipeline |
+A command takes one URL and follows the thread from it: the issue and the pull requests that cite it, together, with whatever the ledger already knows. That is not routing; it is reading enough context to do the job honestly. A maintainer answering the issue changes what an open PR should say, and a review on the PR can make the issue's original ask obsolete. Neither can be judged from one URL alone.
+
+Where a thread disagrees with the command, the command loses:
+
+| Thread state | What the command does |
 |---|---|
-| Issue open, unclaimed, unfixed, no PR | `build` — triage, reproduce, implement, gates, one commit, open the PR |
-| Issue open, PR open, maintainer commented on the **issue** | `revise` — re-read the scope, then amend the patch or say why it still stands |
-| Issue open, PR open, review activity on the **PR** | `resolve` — fix what is actionable, push, answer each point once |
-| PR approved, green, clean | nothing — exit `0`, the thread is with a human |
-| Issue closed, or fixed by a merged PR | nothing — drop the thread |
-| PR closed without a merge | `needs_human` — never open a replacement on its own authority |
-| Nothing new | nothing — exit `0` with `unchanged` |
+| Issue already closed, or fixed by a merged PR | refuse — exit `3`, say which |
+| Issue claimed by another account | refuse |
+| PR approved, green, clean | nothing left to do — exit `0` |
+| PR closed without a merge, and a replacement would be the next step | refuse, `needs_human` — exit `4` |
+| Nothing newer than the ledger | exit `0` with `unchanged` |
 
-That last-but-two row matters as much as the silence rule. A run that quietly opens a fresh PR for a rejected one is the same failure as reopening it, one indirection further out.
+That fourth row matters as much as the silence rule. A command that quietly opens a fresh PR for a rejected one is the same failure as reopening it, one indirection further out.
 
-`--dry-run` prints the route and the reason it was chosen without executing anything, so "what would it do" is a question with a plain answer. `--force` pins a pipeline for the case where a human knows better; the ledger records that the route was overridden.
+### Every command is safe to run twice
 
-`dev` and `resolve` survive as **presets** — `--force build` and `--force resolve` — for the person who wants to be explicit, and for scripts written before `pass` existed. They are not separate entry points, because the routing decision is exactly the classification `watch` already performs, and a second place to make it is a second place to drift.
+This is what replaces a watcher, and it is the only defence that still works when somebody else's scheduler is careless:
 
-### `watch` — the inbox, and no model
+- **Read before acting.** The command digests the thread's observable state — head and base sha, checks by name and conclusion, reviews by id and state, comments by id and author — and compares it with the ledger. Nothing newer means exit `0` with `unchanged`, no model call, no writes.
+- **Our own events are not state changes.** Anything authored by the authenticated account is excluded from the digest, so a command cannot read its own comment as news and answer it. This is the whole guard against talking to itself.
+- **Every action spends a trigger.** An outbound write cites the event id it answers, and an id can be spent once, in the ledger. A retry, a replay or a caller's loop finds it spent and does nothing.
+- **Silence is a result.** A command that finds nothing to do exits `0` and says nothing to anyone but its caller.
 
-```
-agent-runner watch --repo <path> --pr <url> [--issue <url>] [--interval 60s] [--for 30m | --once] [--json]
-```
+A caller may run these as often as it likes. Running one twice costs a handful of conditional requests and changes nothing, which is the property that makes an external scheduler safe rather than something to be afraid of.
 
-Poll, digest, compare against the ledger, classify, enqueue at most one item. **No model is called.** A tick where nothing changed costs a few conditional requests and exits `0`.
+### The issue is part of the job, not a separate watch
 
-This is the part that runs on a timer, and it must be boring. A program that calls a model 288 times a day to discover that nothing happened is unaffordable, and worse, its behaviour changes with the weather. `watch` decides *whether* there is work and *what kind*; `pass` decides *how*.
+The expensive failure on the `build` side is not a bad patch. It is a good patch to the wrong problem: implementing something a maintainer answered in a comment an hour earlier. So `build` reads the issue's comments as part of stage 1, and refuses when the issue already moved:
 
-`watch` and `pass` share one classifier. `watch` runs it over a set and writes to the inbox; `pass` runs it over one thread and executes the answer. The enqueued item is literally the invocation — the same subject and the same pipeline name — so there is no translation layer between "work found" and "work done", and no way for the two to disagree.
-
-Polling is cheap because it is conditional. A request carrying `If-None-Match` that returns `304` does not count against the rate limit — measured on this account, two plain requests each cost one unit and a conditional `304` cost none. The ETag is a filter and never the recorded state: it is opaque and can churn without a semantic change, so the ledger stores a digest it can replay.
-
-Classification is a lookup, not a judgement:
-
-| Observed, newer than our last action | Enqueue |
+| Seen while reading the issue | Effect |
 |---|---|
-| A review with `CHANGES_REQUESTED` | `fix` |
-| A question from someone else on an open thread | `reply` |
-| A check on our head that went red | `repair` |
-| `mergeable_state: dirty` — a real conflict | `rebase` |
-| Approved, green, clean | nothing, and the PR leaves the inbox |
-| Closed or merged by someone else | nothing, and the PR leaves the inbox |
-| **Our own comment is the newest event** | **nothing** |
-| Every ETag unchanged | nothing, exit `0` |
-| Silence | nothing, exit `0` |
+| Closed by anyone | refuse, exit `3` |
+| Fixed by a merged PR referencing it | refuse |
+| Claimed by another account | refuse |
+| Labelled `wontfix`, `needs-discussion`, `invalid` | refuse |
+| A comment newer than the claim, from someone else | re-read it, and implement what it says |
 
-That table is the whole guard against a loop talking to itself, and it is code, so it cannot be argued out of.
+The last row is the one that earns its keep. Scope announced before the run started is scope the run must follow, and it costs one API call to find out.
 
-### Watching the issue, not only the PR
+### Each pipeline is a chain, and it is strict
 
-The expensive failure on the `build` side is not a bad patch. It is a good patch to the wrong problem: implementing something a maintainer answered in a comment an hour earlier. So the issue is polled too, and its state cancels queued work.
-
-| Observed on the issue | Effect |
-|---|---|
-| Closed by anyone | cancel; any queued `build` item is dropped |
-| Fixed by a merged PR referencing it | cancel |
-| Claimed by another account | cancel |
-| Labelled `wontfix`, `needs-discussion`, `invalid` | cancel |
-| A new comment from anyone who is not us | the next run re-reads before it implements or amends |
-
-The last row earns its keep. Scope announced before the run started is scope the run must not follow.
-
-### The pipelines are strict
-
-Whichever route a run takes, its pipeline has a fixed stage list and does one job. Nothing improvises a stage, and nothing expands scope mid-review.
+Each command runs a fixed stage list and does one job. Nothing improvises a stage, and nothing expands scope mid-review. Stages share one tool set and one record shape, which is what lets the three commands be run back to back without a translation layer between them.
 
 `resolve` is **strictly responsive**: it does not improve the neighbourhood while a reviewer is reading. If it spots something the reviewer did not raise, it says so in the reply and leaves the change to a separate `build` run. A bot that silently widens scope inside somebody's review is untrustworthy, and trust is the only currency here.
 
 ### The agentic shape
 
-A `build` run produces the PR. A `revise` or `resolve` run, invoked by whatever is scheduling, keeps it moving until merged. They are separate invocations on purpose: a build run that also loops never ends, and a resolve run that also triages invents work.
+`build` produces the PR. `resolve` and `amend` keep it moving, each invoked when the caller decides it is worth invoking. They are separate invocations on purpose: a build that also loops never ends, and a resolve that also triages invents work.
 
 ### The clock belongs to the caller
 
 This tool does not schedule itself. One invocation runs one job and exits. Looping belongs to the user's shell, an agent's planner, or a meta-framework above this one.
 
-That is a deliberate boundary, not an omission. A worker with its own timer has to answer questions that are not about the work: when to retry, whether the last run is still going, what a stale lock means. Those are scheduler problems. `agent-runner runs --json` exists so an external scheduler can see what is in flight and decide.
+That is a deliberate boundary, not an omission, and it is the difference between a tool and a service. A process that stays running has to answer questions that are not about the work: when to retry, whether the last run is still going, what a stale lock means, what to do when the same thread is picked twice. Those belong to the layer that knows what it wants to spend and on what. Keeping them out is what keeps the pipelines testable, and what lets the same commands run from a shell, a cron, a queue worker or a person's terminal without a single conditional in the code.
+
+`agent-runner runs --json` exists so an external scheduler can see what is in flight and decide.
 
 ## 4. The run record is the product
 
@@ -224,11 +208,11 @@ Each stage has one job and one completion criterion. A failed criterion ends the
 
 Stages 1 to 3 are cheap and local. They exist so stage 4 starts from a fact rather than a guess.
 
-## 8. Pipelines: `revise` and `resolve`
+## 8. Pipelines: `resolve` and `amend`
 
-`resolve` answers the pull request. `revise` answers the issue, when a maintainer has said something on it that an open PR does not yet reflect. They are different pipelines because the input is different: a review comment names the change it wants, while an issue comment changes the ground the change stands on.
+`resolve` answers the pull request. `amend` answers the issue, when a maintainer has said something on it that an open PR does not yet reflect. They are different pipelines because the input is different: a review comment names the change it wants, while an issue comment changes the ground the change stands on.
 
-### `revise`
+### `amend`
 
 | # | Stage | Does | Done when |
 |---|---|---|---|
@@ -312,7 +296,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 - **No secrets in the transcript.** Tokens come from the environment; the record shows that a command ran.
 - **No self-scheduling.** One invocation, one job, exit.
 - **Never ask for anything.** The worker produces work and answers questions. Requests for review, for merge, for attention or for urgency are not in its vocabulary; a person decides when the work is looked at, and their clock is not ours to hurry.
-- **The model decides how, never whether.** Whether there is work, and which kind, is a deterministic classification over fetched state. A model is invoked only after that decision, with exactly one item, and it never chooses to act when the inbox is empty.
+- **A command decides how; the caller decides whether.** Which of the three runs is the caller's business. Within a run, whether there is work at all is a digest comparison, not a judgement, and a command with nothing new exits before it spends a model call.
 - **The ledger is the state.** Every run reads the previous ledger and writes one. Nothing is remembered in a process, a scratchpad or a prompt, so a run can be replayed and two runs cannot disagree about what happened.
 
 ## 13. Exit codes
@@ -333,7 +317,21 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 - A UI. The report is Markdown because Markdown is the interface.
 - An agent protocol. This is a batch process with a paper trail; interactive transports are a separate concern at one seam, stage 4's implementer, and they can be added there without changing the shape.
 - Owning a clock. Scheduling is the caller's problem by design.
+- Watchers, daemons, pollers, queues, leases or work-in-progress limits. Those are the meta framework's job: it decides which thread gets a command and when. A `watch` command inside this binary would be the first step of turning a tool into a service, and the moment that happens the pipelines stop being testable in isolation.
+- Deciding which of the three commands to run. Routing on "what changed" looks helpful and is the caller's judgement wearing a hat.
 - Deleting anything on its own initiative. `gc` is a command with a dry run, and it is the only thing here that removes files.
+
+## 14.1 Where the meta framework goes
+
+Scheduling a `resolve` every ten minutes, holding a queue of issues, enforcing one PR in flight per repo, deciding that a thread is worth another run — all of it lives above this binary and talks to it through exit codes, `--json` and the run records. Nothing in that layer needs to be in this repo, and nothing in this repo needs to know it exists.
+
+The contract between the two is deliberately small:
+
+- a command takes a URL and a repo path, and exits with a code from §13;
+- `--json` on stdout describes what happened, in a shape that does not change between runs;
+- a run record on disk describes how it happened, and can be replayed.
+
+If a scheduler needs more than that, the scheduler is doing something the pipeline should be doing.
 
 ## 15. What exists, what is missing
 
@@ -341,10 +339,11 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 |---|---|
 | Step-capped loop, transcript, tool registry | **done** — `internal/agent`, `internal/tools` (Go) |
 | argv-only command runner, flag allowlist, workdir confinement | **done** — Go port, race-tested, symlink escapes covered |
-| `pass`/`watch` entry points, routing table, `--dry-run` | **missing** — `dev`/`resolve` flags parse and print a plan |
+| `build`/`resolve`/`amend` commands, thread reading, `--dry-run` | **partial** — `dev`/`resolve` flags parse and print a plan |
 | Run directory, ndjson record, `REPORT.md` | **missing** |
 | Event ledger: observations, actions, trigger spend | **missing** |
-| `watch`: conditional fetch, digest, classify, enqueue | **missing** — no model in this path |
+| Idempotence: digest, own-event exclusion, trigger spend | **missing** |
+| `amend` pipeline | **missing** |
 | `replay` from a recorded run | **missing** |
 | Resume and stage idempotency | **missing** |
 | Worktree per run (filesystem scope) | **missing** |
@@ -361,7 +360,7 @@ Ordered so the property that matters is proven first. Determinism is not a miles
 
 - **M0 — the ledger.** Append-only events, the world digest, trigger spend, and `replay`. Proven by three fixtures taken from real failures: a PR whose newest event is our own comment with no human reply, a PR we closed, and a PR whose review we already answered. Each must plan zero actions and exit `0`.
 - **M0.5 — the cage.** `--sandbox` with container detection, network allowlist, process-group timeouts, and the self-audit that lists writes outside the run directory. Proven by a deliberate escape attempt that gets refused.
-- **M0.7 — the inbox.** `watch --once` over the seven open PRs: conditional requests, digest, classification table, and an exit of `0` with nothing enqueued. Proven by running it twice against an untouched PR and getting no second action, and by pointing it at a PR whose newest event is our own comment.
+- **M0.7 — safe to run twice.** `resolve` over one open PR: digest, own-event exclusion, trigger spend. Proven by running it twice against an untouched PR and getting `unchanged` with no writes the second time, and by pointing it at a PR whose newest event is our own comment.
 - **M1 — resolve on a live PR.** One PR, one review round, guards enforced, and a silent world ending in `unchanged` with no notification. This is the first milestone where the program does something a prompt cannot.
 - **M2 — one repo, one issue.** Reproduce, implement, gates, commit on a worktree branch. No PR.
 - **M3 — PR back.** Push, `gh pr create`, refusal paths exercised, one PR in flight per repo enforced.
@@ -370,10 +369,10 @@ Ordered so the property that matters is proven first. Determinism is not a miles
 
 ## 17. Failure modes worth naming
 
-Three things went wrong in practice, before this program existed, and each one has a guard above because the shape recurs.
+Three things went wrong in practice, before this program existed, and each one has a guard above because the shape recurs. All three came from a loop that ran on its own timer; two of them are impossible here now that the timer lives outside, and the third is the reason the digest exists.
 
 - **The loop answers its own comment.** A comment it wrote looks like activity, so the next scheduled run replies again, and the one after that. Fix: our events are excluded from the digest, and a trigger can be spent once.
-- **Nobody is awake, so it applies pressure.** A maintainer asleep at 03:00 is not a stalled PR. A loop that reads silence as a problem to solve will ask for a merge, then ask again. Fix: requests do not exist in the action set; an approved PR is a finished run.
+- **Nobody is awake, so it applies pressure.** A maintainer asleep at 03:00 is not a stalled PR. A loop that reads silence as a problem to solve will ask for a merge, then ask again. Fix: requests do not exist in the action set; an approved PR is a finished run. The timer being someone else's makes this rarer, not impossible — a careless cron is still a cron.
 - **A wall closes and it tries the door.** Close/reopen three times on one PR, each attempt a notification to someone who did not ask. Fix: those verbs are absent from the code, and a repeated failure from the same world is a `blocked` exit.
 
 ## 18. How we know it works
@@ -384,4 +383,4 @@ Three things went wrong in practice, before this program existed, and each one h
 - **Resume honesty** — runs interrupted on purpose that finished correctly when resumed, without repeating a side effect.
 - **Cost per merged PR**, counted from the run records rather than from memory.
 - **Replay fidelity** — runs whose recomputed plan matches the recorded one, across the fixture set. It belongs at 100%; anything lower means the loop responded to something the record does not contain.
-- **Wordless runs** — resolve invocations that ended `unchanged` and produced no notification. A high number is the product working: the loop is on a timer and the humans are asleep.
+- **Wordless runs** — invocations that ended `unchanged` and notified nobody. A high number means the caller is polling more than the world is changing, which is exactly the state a scheduler should reach overnight. It is measured by whoever is calling, from the exit codes; this binary just reports them honestly.
