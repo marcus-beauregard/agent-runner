@@ -8,7 +8,47 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestNewRefusesReusedID proves the collision rule: an id that already has a
+// directory fails instead of being reused, and the run already there is left
+// exactly as it was.
+func TestNewRefusesReusedID(t *testing.T) {
+	base := t.TempDir()
+	fixed := "20260101-000000.000000-abcdef"
+	old := generateID
+	generateID = func(time.Time) (string, error) { return fixed, nil }
+	t.Cleanup(func() { generateID = old })
+
+	first, err := New(base, Meta{Kind: "build", Subject: "https://example.test/issues/1"})
+	if err != nil {
+		t.Fatalf("first New: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(first.Dir, "run.json"))
+	if err != nil {
+		t.Fatalf("read first run.json: %v", err)
+	}
+
+	if _, err := New(base, Meta{Kind: "build", Subject: "https://example.test/issues/2"}); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second New = %v, want an error wrapping os.ErrExist", err)
+	}
+
+	after, err := os.ReadFile(filepath.Join(first.Dir, "run.json"))
+	if err != nil {
+		t.Fatalf("read run.json after the refused New: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the refused New rewrote the existing record:\n%s", after)
+	}
+	entries, err := os.ReadDir(filepath.Join(base, "agent-runner", "runs"))
+	if err != nil {
+		t.Fatalf("read runs: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("runs holds %d entries, want 1", len(entries))
+	}
+}
 
 // TestNewCreatesLayout checks the tree every later stage writes into exists and
 // is private: a record holds paths and reasoning.

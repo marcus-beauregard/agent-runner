@@ -92,8 +92,9 @@ func runAgent(ctx context.Context, args []string) int {
 }
 
 // work runs the M0 dry-run: it plans the change and prints the gate it would
-// run, writing nothing. The issue URL is the leading positional argument, so it
-// is consumed before the flag set, which stops at the first non-flag.
+// run, writing nothing except the run record when --run-dir asks for one. The
+// issue URL is the leading positional argument, so it is consumed before the
+// flag set, which stops at the first non-flag.
 func work(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "agent-runner: work: exactly one issue URL is required")

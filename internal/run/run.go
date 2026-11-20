@@ -84,7 +84,7 @@ func New(base string, meta Meta) (*Run, error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	id, err := newID(now)
+	id, err := generateID(now)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +199,10 @@ func defaultBase() (string, error) {
 	}
 	return filepath.Join(home, ".local", "state"), nil
 }
+
+// generateID is newID behind a variable so a test can force the collision New
+// refuses; nothing in the program reassigns it.
+var generateID = newID
 
 // newID returns an id that sorts newest-last: UTC to the microsecond, then six
 // random hex characters so two runs in the same instant still differ. Second
