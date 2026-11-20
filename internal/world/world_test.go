@@ -1,9 +1,56 @@
 package world
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// TestSortWorldKeepsDuplicateCheckOrder holds the one sort that cannot rely on
+// its key being unique: a commit that ran the same check twice has two entries
+// with one name, and they have to keep the order the API answered in.
+func TestSortWorldKeepsDuplicateCheckOrder(t *testing.T) {
+	// Enough entries that the sort is not insertion sort, and two names each
+	// repeated, so an unstable sort has somewhere to reorder them.
+	var w World
+	var want []string
+	for i := 0; i < 24; i++ {
+		name := []string{"build", "vet"}[i%2]
+		w.Checks = append(w.Checks, Check{Name: name, Conclusion: fmt.Sprintf("run-%02d", i)})
+	}
+	for _, name := range []string{"build", "vet"} {
+		for i := 0; i < 24; i++ {
+			if []string{"build", "vet"}[i%2] == name {
+				want = append(want, name+" run-"+fmt.Sprintf("%02d", i))
+			}
+		}
+	}
+	sortWorld(&w)
+	var got []string
+	for _, c := range w.Checks {
+		got = append(got, c.Name+" "+c.Conclusion)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("Checks = %v, want %v: duplicate names must keep the API's order", got, want)
+	}
+}
+
+func TestMergeableString(t *testing.T) {
+	cases := []struct {
+		m    Mergeable
+		want string
+	}{
+		{m: MergeableYes, want: "yes"},
+		{m: MergeableNo, want: "no"},
+		{m: MergeableUnknown, want: "unknown"},
+	}
+	for _, tc := range cases {
+		if got := tc.m.String(); got != tc.want {
+			t.Errorf("Mergeable(%d).String() = %q, want %q", int(tc.m), got, tc.want)
+		}
+	}
+}
 
 func TestParseRef(t *testing.T) {
 	cases := []struct {

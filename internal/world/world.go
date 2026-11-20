@@ -19,7 +19,7 @@ type World struct {
 	Issue    Issue     // never the zero value: every thread has an issue
 	PR       PR        // the zero value when the ref is an issue with no pull request
 	Reviews  []Review  // sorted by ID
-	Checks   []Check   // sorted by Name
+	Checks   []Check   // sorted by Name, ties in the order the API answered
 	Comments []Comment // sorted by ID
 }
 
@@ -38,9 +38,36 @@ type PR struct {
 	HeadSHA        string
 	BaseSHA        string
 	Draft          bool
-	Mergeable      bool
+	Mergeable      Mergeable
 	MergeableState string
 	State          string
+}
+
+// Mergeable is GitHub's answer to whether the pull request can be merged, which
+// has three states and not two: yes, no, and not computed yet. GitHub reports
+// the third as JSON null, and a bool turns that into "no" — a refusal with a
+// reason nobody gave.
+type Mergeable int
+
+const (
+	// MergeableUnknown means GitHub has not computed mergeability yet.
+	MergeableUnknown Mergeable = iota
+	// MergeableNo means GitHub says the pull request cannot be merged.
+	MergeableNo
+	// MergeableYes means GitHub says the pull request can be merged.
+	MergeableYes
+)
+
+// String names the state, so a log line or a report does not print a bare int.
+func (m Mergeable) String() string {
+	switch m {
+	case MergeableYes:
+		return "yes"
+	case MergeableNo:
+		return "no"
+	default:
+		return "unknown"
+	}
 }
 
 // Review is one review on the pull request.
@@ -98,7 +125,11 @@ func ParseRef(ref string) (owner, repo string, number int, err error) {
 // read the same thread produce the same value — and later the same digest —
 // whatever order the API happened to answer in.
 func sortWorld(w *World) {
+	// Reviews and comments sort on an id, which is unique, so the order is total
+	// whatever the sort does. Check names repeat — a commit that ran "build"
+	// twice has two of them — so that sort has to be stable, keeping the order
+	// the API answered in and the same order on the next read.
 	sort.Slice(w.Reviews, func(i, j int) bool { return w.Reviews[i].ID < w.Reviews[j].ID })
-	sort.Slice(w.Checks, func(i, j int) bool { return w.Checks[i].Name < w.Checks[j].Name })
+	sort.SliceStable(w.Checks, func(i, j int) bool { return w.Checks[i].Name < w.Checks[j].Name })
 	sort.Slice(w.Comments, func(i, j int) bool { return w.Comments[i].ID < w.Comments[j].ID })
 }

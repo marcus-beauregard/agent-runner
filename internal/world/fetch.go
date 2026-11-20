@@ -1,6 +1,7 @@
 package world
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,23 +28,75 @@ func Fetch(ctx context.Context, ref string) (World, error) {
 	return fetch(ctx, ghAPI(gh), ref, owner, repo, number)
 }
 
-// ghAPI returns the source that runs gh. A non-zero exit becomes an error
-// carrying gh's stderr: "exit status 1" alone never says what went wrong, and
-// the sentence gh wrote on stderr always does.
+// ghAPI returns the source that runs gh. Pagination is not optional here: past
+// the first page a long review is dropped without a word, and because everything
+// is later sorted by id the pages lost are the newest ones — exactly the ones an
+// unchanged comparison exists to notice. --paginate walks the Link header;
+// --slurp wraps each page in one JSON array, the only form gh prints that stays
+// valid JSON whatever the page count.
+//
+// A non-zero exit becomes an error carrying gh's stderr: "exit status 1" alone
+// never says what went wrong, and the sentence gh wrote on stderr always does.
 func ghAPI(gh string) source {
 	return func(ctx context.Context, path string, v any) error {
-		out, err := exec.CommandContext(ctx, gh, "api", path).Output()
+		out, err := exec.CommandContext(ctx, gh, "api", "--paginate", "--slurp", path).Output()
 		if err != nil {
 			if ee, ok := err.(*exec.ExitError); ok {
 				return fmt.Errorf("gh api %s: %s", path, strings.TrimSpace(string(ee.Stderr)))
 			}
 			return fmt.Errorf("gh api %s: %w", path, err)
 		}
-		if err := json.Unmarshal(out, v); err != nil {
+		var pages []json.RawMessage
+		if err := json.Unmarshal(out, &pages); err != nil {
+			return fmt.Errorf("parse gh api %s: %w", path, err)
+		}
+		if err := decodePages(pages, v); err != nil {
 			return fmt.Errorf("parse gh api %s: %w", path, err)
 		}
 		return nil
 	}
+}
+
+// decodePages turns gh's array of pages into the value the caller asked for: a
+// list response becomes every page's elements joined, a single object response
+// becomes the one page gh printed.
+func decodePages(pages []json.RawMessage, v any) error {
+	if len(pages) == 0 {
+		return nil
+	}
+	if first := bytes.TrimSpace(pages[0]); len(first) > 0 && first[0] == '[' {
+		joined, err := joinPages(pages)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(joined, v)
+	}
+	if len(pages) != 1 {
+		return fmt.Errorf("want one page of a single object, got %d", len(pages))
+	}
+	return json.Unmarshal(pages[0], v)
+}
+
+// joinPages concatenates the elements of every page into one JSON array.
+func joinPages(pages []json.RawMessage) ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte('[')
+	for i, p := range pages {
+		p = bytes.TrimSpace(p)
+		if len(p) < 2 || p[0] != '[' || p[len(p)-1] != ']' {
+			return nil, fmt.Errorf("page %d is not a JSON array", i+1)
+		}
+		inner := bytes.TrimSpace(p[1 : len(p)-1])
+		if len(inner) == 0 {
+			continue
+		}
+		if b.Len() > 1 {
+			b.WriteByte(',')
+		}
+		b.Write(inner)
+	}
+	b.WriteByte(']')
+	return b.Bytes(), nil
 }
 
 // fetch reads the endpoints a World is made of: the issue always, and the pull
@@ -79,6 +132,11 @@ func fetch(ctx context.Context, src source, ref, owner, repo string, number int)
 			return World{}, err
 		}
 		w.Checks = cs.checks()
+		// total_count is the server's count for this commit, so a read that
+		// collected fewer has lost a page and must not pass for a whole one.
+		if len(w.Checks) < cs.TotalCount {
+			return World{}, fmt.Errorf("check-runs for %s: read %d of %d", w.PR.HeadSHA, len(w.Checks), cs.TotalCount)
+		}
 	}
 
 	var cms []rawComment
@@ -117,7 +175,7 @@ type rawLabelName struct {
 type rawPR struct {
 	Number         int    `json:"number"`
 	Draft          bool   `json:"draft"`
-	Mergeable      bool   `json:"mergeable"`
+	Mergeable      *bool  `json:"mergeable"`
 	MergeableState string `json:"mergeable_state"`
 	State          string `json:"state"`
 	Head           rawSHA `json:"head"`
@@ -166,9 +224,23 @@ func (r rawPR) pr() PR {
 		HeadSHA:        r.Head.SHA,
 		BaseSHA:        r.Base.SHA,
 		Draft:          r.Draft,
-		Mergeable:      r.Mergeable,
+		Mergeable:      r.mergeable(),
 		MergeableState: r.MergeableState,
 		State:          r.State,
+	}
+}
+
+// mergeable keeps "no" apart from "not yet": GitHub sends null while it works
+// out mergeability, and a plain bool reads that as false — a decision to refuse
+// the merge with a reason nobody wrote.
+func (r rawPR) mergeable() Mergeable {
+	switch {
+	case r.Mergeable == nil:
+		return MergeableUnknown
+	case *r.Mergeable:
+		return MergeableYes
+	default:
+		return MergeableNo
 	}
 }
 

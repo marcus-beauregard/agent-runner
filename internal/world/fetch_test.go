@@ -60,8 +60,8 @@ func TestFetchPRWorld(t *testing.T) {
 	if w.PR.Number != 7 || w.PR.HeadSHA != "aaa111" || w.PR.BaseSHA != "bbb222" {
 		t.Errorf("PR numbers = %d %q %q, want 7 aaa111 bbb222", w.PR.Number, w.PR.HeadSHA, w.PR.BaseSHA)
 	}
-	if w.PR.Draft || !w.PR.Mergeable || w.PR.MergeableState != "clean" || w.PR.State != "open" {
-		t.Errorf("PR flags = draft:%t mergeable:%t state:%q state:%q, want false true clean open",
+	if w.PR.Draft || w.PR.Mergeable != MergeableYes || w.PR.MergeableState != "clean" || w.PR.State != "open" {
+		t.Errorf("PR flags = draft:%t mergeable:%s state:%q state:%q, want false yes clean open",
 			w.PR.Draft, w.PR.Mergeable, w.PR.MergeableState, w.PR.State)
 	}
 
@@ -119,6 +119,119 @@ func TestChecksWithoutRunsIsEmpty(t *testing.T) {
 	if got := cs.checks(); len(got) != 0 {
 		t.Errorf("checks() = %+v, want none", got)
 	}
+}
+
+// stubSource answers a fetch from fixed JSON per path, for the cases a recorded
+// thread does not cover.
+func stubSource(t *testing.T, responses map[string]string) source {
+	t.Helper()
+	return func(_ context.Context, path string, v any) error {
+		raw, ok := responses[path]
+		if !ok {
+			return fmt.Errorf("no stub for %s", path)
+		}
+		return json.Unmarshal([]byte(raw), v)
+	}
+}
+
+// TestFetchFailsWhenCheckRunsAreShort is the guard on the guard: paging is what
+// keeps a read whole, and a count the server gives is what proves it stayed
+// whole. A read that collected one of three must be an error, not a World that
+// looks complete.
+func TestFetchFailsWhenCheckRunsAreShort(t *testing.T) {
+	src := stubSource(t, map[string]string{
+		"/repos/octo/agent-runner/issues/7":                  `{"number":7,"title":"t","state":"open","pull_request":{"url":"https://api.github.com/repos/octo/agent-runner/pulls/7"}}`,
+		"/repos/octo/agent-runner/pulls/7":                   `{"number":7,"mergeable":true,"head":{"sha":"aaa111"},"base":{"sha":"bbb222"}}`,
+		"/repos/octo/agent-runner/pulls/7/reviews":           `[]`,
+		"/repos/octo/agent-runner/commits/aaa111/check-runs": `{"total_count":3,"check_runs":[{"name":"build","status":"completed","conclusion":"success"}]}`,
+		"/repos/octo/agent-runner/issues/7/comments":         `[]`,
+	})
+	_, err := fetch(context.Background(), src, "https://github.com/octo/agent-runner/pull/7", "octo", "agent-runner", 7)
+	if err == nil {
+		t.Fatal("fetch succeeded, want an error naming the missing check runs")
+	}
+	if got := err.Error(); !strings.Contains(got, "read 1 of 3") {
+		t.Errorf("error = %q, want it to say what was read of what was promised", got)
+	}
+}
+
+// TestGhAPIJoinsEveryPage runs a gh that prints two pages the way
+// --paginate --slurp does, and asserts both land in the slice and the flags were
+// actually passed.
+func TestGhAPIJoinsEveryPage(t *testing.T) {
+	gh := fakeGh(t, `if [ "$2" != "--paginate" ] || [ "$3" != "--slurp" ]; then
+  echo "read without pagination: $@" >&2
+  exit 3
+fi
+cat <<'EOF'
+[[{"id":3}],[{"id":1},{"id":2}]]
+EOF
+`)
+	var got []struct {
+		ID int64 `json:"id"`
+	}
+	if err := ghAPI(gh)(context.Background(), "/x", &got); err != nil {
+		t.Fatalf("ghAPI: %v", err)
+	}
+	var ids []int64
+	for _, g := range got {
+		ids = append(ids, g.ID)
+	}
+	if want := []int64{3, 1, 2}; !slices.Equal(ids, want) {
+		t.Errorf("ids = %v, want %v; every page, in the order gh printed them", ids, want)
+	}
+}
+
+// TestGhAPIDecodesSingleObjectPage covers the other shape: an endpoint that
+// returns one object, which --slurp wraps in a one-element array.
+func TestGhAPIDecodesSingleObjectPage(t *testing.T) {
+	gh := fakeGh(t, `cat <<'EOF'
+[{"number":7,"state":"open"}]
+EOF
+`)
+	var pr rawPR
+	if err := ghAPI(gh)(context.Background(), "/x", &pr); err != nil {
+		t.Fatalf("ghAPI: %v", err)
+	}
+	if pr.Number != 7 || pr.State != "open" {
+		t.Errorf("PR = %d %q, want 7 open", pr.Number, pr.State)
+	}
+}
+
+// TestMergeableKeepsNotYetApartFromNo is the tri-state itself: null means GitHub
+// is still computing, which is neither yes nor no.
+func TestMergeableKeepsNotYetApartFromNo(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want Mergeable
+	}{
+		{name: "true", body: `{"mergeable":true}`, want: MergeableYes},
+		{name: "false", body: `{"mergeable":false}`, want: MergeableNo},
+		{name: "null while computing", body: `{"mergeable":null}`, want: MergeableUnknown},
+		{name: "absent", body: `{}`, want: MergeableUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var r rawPR
+			if err := json.Unmarshal([]byte(tc.body), &r); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := r.pr().Mergeable; got != tc.want {
+				t.Errorf("Mergeable = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// fakeGh writes an executable gh whose body is the given shell script.
+func fakeGh(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	return path
 }
 
 // TestFetchCarriesGhStderr puts a gh on PATH that fails the way the real one
