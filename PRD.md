@@ -21,9 +21,53 @@ The second problem is what happens after the PR exists. A review arrives, or CI 
 3. **An agent.** Something with no hands calls the CLI, reads machine output, and decides what to do next.
 4. **Anyone reading the repo.** If the process is in the PRD and the code, the tool is legible without watching me work.
 
-## 3. Two modes
+## 3. Three commands
 
-The two modes exist because they have different exit contracts, not because they are two halves of a nicer name.
+Two of them think. One of them only looks, and it is the one that runs all day.
+
+Every command is one invocation: it does a job and exits. Nothing here schedules itself.
+
+### `watch` — the inbox, and no model
+
+```
+agent-runner watch --repo <path> --pr <url> [--issue <url>] [--interval 60s] [--for 30m | --once] [--json]
+```
+
+Poll, digest, compare against the ledger, classify, enqueue at most one item. **No model is called.** A tick where nothing changed costs a few conditional requests and exits `0`.
+
+This is the part that runs on a timer, and it must be boring. A program that calls a model 288 times a day to discover that nothing happened is unaffordable, and worse, its behaviour changes with the weather. `watch` decides *whether* there is work and *what kind*; `dev` and `resolve` decide *how*.
+
+Polling is cheap because it is conditional. A request carrying `If-None-Match` that returns `304` does not count against the rate limit — measured on this account, two plain requests each cost one unit and a conditional `304` cost none. The ETag is a filter and never the recorded state: it is opaque and can churn without a semantic change, so the ledger stores a digest it can replay.
+
+Classification is a lookup, not a judgement:
+
+| Observed, newer than our last action | Enqueue |
+|---|---|
+| A review with `CHANGES_REQUESTED` | `fix` |
+| A question from someone else on an open thread | `reply` |
+| A check on our head that went red | `repair` |
+| `mergeable_state: dirty` — a real conflict | `rebase` |
+| Approved, green, clean | nothing, and the PR leaves the inbox |
+| Closed or merged by someone else | nothing, and the PR leaves the inbox |
+| **Our own comment is the newest event** | **nothing** |
+| Every ETag unchanged | nothing, exit `0` |
+| Silence | nothing, exit `0` |
+
+That table is the whole guard against a loop talking to itself, and it is code, so it cannot be argued out of.
+
+### Watching the issue, not only the PR
+
+The expensive failure on the `dev` side is not a bad patch. It is a good patch to the wrong problem: implementing something a maintainer answered in a comment an hour earlier. So the issue is polled too, and its state cancels queued work.
+
+| Observed on the issue | Effect |
+|---|---|
+| Closed by anyone | cancel; any queued `dev` item is dropped |
+| Fixed by a merged PR referencing it | cancel |
+| Claimed by another account | cancel |
+| Labelled `wontfix`, `needs-discussion`, `invalid` | cancel |
+| A new comment from anyone who is not us | the next `dev` run re-reads before it implements |
+
+The last row earns its keep. Scope announced before the run started is scope the run must not follow.
 
 ### `dev` — from an issue to something reviewable
 
@@ -232,6 +276,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 - **No secrets in the transcript.** Tokens come from the environment; the record shows that a command ran.
 - **No self-scheduling.** One invocation, one job, exit.
 - **Never ask for anything.** The worker produces work and answers questions. Requests for review, for merge, for attention or for urgency are not in its vocabulary; a person decides when the work is looked at, and their clock is not ours to hurry.
+- **The model decides how, never whether.** Whether there is work, and which kind, is a deterministic classification over fetched state. A model is invoked only after that decision, with exactly one item, and it never chooses to act when the inbox is empty.
 - **The ledger is the state.** Every run reads the previous ledger and writes one. Nothing is remembered in a process, a scratchpad or a prompt, so a run can be replayed and two runs cannot disagree about what happened.
 
 ## 13. Exit codes
@@ -263,6 +308,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 | `dev`/`resolve` subcommands, `--dry-run` plan | **partial** — flags parse, plan prints, nothing executes |
 | Run directory, ndjson record, `REPORT.md` | **missing** |
 | Event ledger: observations, actions, trigger spend | **missing** |
+| `watch`: conditional fetch, digest, classify, enqueue | **missing** — no model in this path |
 | `replay` from a recorded run | **missing** |
 | Resume and stage idempotency | **missing** |
 | Worktree per run (filesystem scope) | **missing** |
@@ -279,6 +325,7 @@ Ordered so the property that matters is proven first. Determinism is not a miles
 
 - **M0 — the ledger.** Append-only events, the world digest, trigger spend, and `replay`. Proven by three fixtures taken from real failures: a PR whose newest event is our own comment with no human reply, a PR we closed, and a PR whose review we already answered. Each must plan zero actions and exit `0`.
 - **M0.5 — the cage.** `--sandbox` with container detection, network allowlist, process-group timeouts, and the self-audit that lists writes outside the run directory. Proven by a deliberate escape attempt that gets refused.
+- **M0.7 — the inbox.** `watch --once` over the seven open PRs: conditional requests, digest, classification table, and an exit of `0` with nothing enqueued. Proven by running it twice against an untouched PR and getting no second action, and by pointing it at a PR whose newest event is our own comment.
 - **M1 — resolve on a live PR.** One PR, one review round, guards enforced, and a silent world ending in `unchanged` with no notification. This is the first milestone where the program does something a prompt cannot.
 - **M2 — one repo, one issue.** Reproduce, implement, gates, commit on a worktree branch. No PR.
 - **M3 — PR back.** Push, `gh pr create`, refusal paths exercised, one PR in flight per repo enforced.
