@@ -243,8 +243,9 @@ func ensureDir(path string) error {
 }
 
 // writeRecord writes run.json atomically: a temp file in the same directory,
-// synced, then renamed over the target. A crash leaves either no run.json or a
-// complete one, never half a file a later run mistakes for a record.
+// synced, renamed over the target, then the directory synced. A crash or a
+// power loss leaves either no run.json or a complete one, never half a file a
+// later run mistakes for a record.
 func writeRecord(dir string, rec record) error {
 	b, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
@@ -276,5 +277,15 @@ func writeRecord(dir string, rec record) error {
 		return fmt.Errorf("publish run.json: %w", err)
 	}
 	tmp = ""
+	// Sync the directory too: the rename is durable only once the entry itself
+	// is on disk, not just the bytes the entry points at.
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open run directory: %w", err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("sync run directory: %w", err)
+	}
 	return nil
 }

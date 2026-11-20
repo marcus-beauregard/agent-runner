@@ -109,7 +109,7 @@ func work(ctx context.Context, args []string) int {
 	repo := fs.String("repo", "", "path to an existing checkout (unused in the dry run)")
 	gate := fs.String("gate", "", "the command that decides whether the work is done")
 	dryRun := fs.Bool("dry-run", false, "plan only; write nothing")
-	runDir := fs.String("run-dir", "", "base directory for the run record (default: the user state directory)")
+	runDir := fs.String("run-dir", "", "base directory for the run record; no record is written unless it is set")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usage(os.Stdout)
@@ -169,7 +169,7 @@ func usage(w io.Writer) {
 Usage:
   agent-runner run <task>                                        run the offline mock agent
   agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>] --dry-run
-                                                                 plan the work, write nothing
+                                                                 plan the work, writing nothing but the run record
   agent-runner --help                                            show this help
   agent-runner --version                                         print the version
 `)
