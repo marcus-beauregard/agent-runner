@@ -7,32 +7,58 @@ import (
 	"testing"
 )
 
-// TestSortWorldKeepsDuplicateCheckOrder holds the one sort that cannot rely on
-// its key being unique: a commit that ran the same check twice has two entries
-// with one name, and they have to keep the order the API answered in.
-func TestSortWorldKeepsDuplicateCheckOrder(t *testing.T) {
+// TestSortWorldOrdersDuplicateChecksByID is the one sort whose key is not
+// unique: a commit that ran the same check twice has two entries with one name.
+// Preserving the order the API answered in is not enough — the next read may
+// answer in a different order, and the value that feeds the digest has to be the
+// same one. The unique id is the tie-break, so two answer orders must land on
+// one result.
+func TestSortWorldOrdersDuplicateChecksByID(t *testing.T) {
 	// Enough entries that the sort is not insertion sort, and two names each
 	// repeated, so an unstable sort has somewhere to reorder them.
-	var w World
-	var want []string
-	for i := 0; i < 24; i++ {
-		name := []string{"build", "vet"}[i%2]
-		w.Checks = append(w.Checks, Check{Name: name, Conclusion: fmt.Sprintf("run-%02d", i)})
+	newWorld := func(ids []int64) World {
+		var w World
+		for i, id := range ids {
+			w.Checks = append(w.Checks, Check{ID: id, Name: []string{"build", "vet"}[i%2]})
+		}
+		return w
 	}
+	var ascending []int64
+	for i := int64(0); i < 24; i++ {
+		ascending = append(ascending, i)
+	}
+	// A fixed permutation, not a random one, so a failure is reproducible: swap
+	// each pair, then reverse the whole slice.
+	var shuffled []int64
+	for i := int64(0); i < 24; i += 2 {
+		shuffled = append(shuffled, i+1, i)
+	}
+	for i := int64(0); i < 12; i++ {
+		shuffled[i], shuffled[23-i] = shuffled[23-i], shuffled[i]
+	}
+
+	a := newWorld(ascending)
+	b := newWorld(shuffled)
+	sortWorld(&a)
+	sortWorld(&b)
+	if !slices.Equal(a.Checks, b.Checks) {
+		t.Fatalf("same checks, two answer orders:\n ascending: %v\n shuffled:  %v", a.Checks, b.Checks)
+	}
+
+	var got []string
+	for _, c := range a.Checks {
+		got = append(got, fmt.Sprintf("%s %d", c.Name, c.ID))
+	}
+	var want []string
 	for _, name := range []string{"build", "vet"} {
-		for i := 0; i < 24; i++ {
+		for i := int64(0); i < 24; i++ {
 			if []string{"build", "vet"}[i%2] == name {
-				want = append(want, name+" run-"+fmt.Sprintf("%02d", i))
+				want = append(want, fmt.Sprintf("%s %d", name, i))
 			}
 		}
 	}
-	sortWorld(&w)
-	var got []string
-	for _, c := range w.Checks {
-		got = append(got, c.Name+" "+c.Conclusion)
-	}
 	if !slices.Equal(got, want) {
-		t.Errorf("Checks = %v, want %v: duplicate names must keep the API's order", got, want)
+		t.Errorf("Checks = %v, want %v: name first, then id", got, want)
 	}
 }
 

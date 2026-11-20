@@ -75,11 +75,14 @@ func TestFetchPRWorld(t *testing.T) {
 		t.Errorf("Reviews = %v, want %v", reviews, want)
 	}
 
+	// The fixture lists vet first, and each check carries the id that has to
+	// survive the read: it is what makes two checks with one name order the same
+	// way on the next read.
 	var checks []string
 	for _, c := range w.Checks {
-		checks = append(checks, fmt.Sprintf("%s %s %s", c.Name, c.Conclusion, c.Status))
+		checks = append(checks, fmt.Sprintf("%d %s %s %s", c.ID, c.Name, c.Conclusion, c.Status))
 	}
-	if want := []string{"build failure completed", "vet success completed"}; !slices.Equal(checks, want) {
+	if want := []string{"400 build failure completed", "500 vet success completed"}; !slices.Equal(checks, want) {
 		t.Errorf("Checks = %v, want %v", checks, want)
 	}
 
@@ -111,13 +114,24 @@ func TestFetchIssueWorldHasNoPR(t *testing.T) {
 	}
 }
 
-func TestChecksWithoutRunsIsEmpty(t *testing.T) {
-	var cs rawChecks
-	if err := json.Unmarshal([]byte(`{"total_count":0,"check_runs":[]}`), &cs); err != nil {
-		t.Fatalf("parse check-runs: %v", err)
+// TestFetchEmptyChecksIsNotAnError is the ticket's edge case, through fetch and
+// not through the conversion: a head with no check runs is a normal state, and a
+// read that passes through every endpoint then the count guard must return an
+// empty list rather than fail.
+func TestFetchEmptyChecksIsNotAnError(t *testing.T) {
+	src := stubSource(t, map[string]string{
+		"/repos/octo/agent-runner/issues/7":                  `{"number":7,"title":"t","state":"open","pull_request":{}}`,
+		"/repos/octo/agent-runner/pulls/7":                   `{"number":7,"mergeable":true,"head":{"sha":"aaa111"},"base":{"sha":"bbb222"}}`,
+		"/repos/octo/agent-runner/pulls/7/reviews":           `[]`,
+		"/repos/octo/agent-runner/commits/aaa111/check-runs": `{"total_count":0,"check_runs":[]}`,
+		"/repos/octo/agent-runner/issues/7/comments":         `[]`,
+	})
+	w, err := fetch(context.Background(), src, "https://github.com/octo/agent-runner/pull/7", "octo", "agent-runner", 7)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
 	}
-	if got := cs.checks(); len(got) != 0 {
-		t.Errorf("checks() = %+v, want none", got)
+	if len(w.Checks) != 0 {
+		t.Errorf("Checks = %+v, want none", w.Checks)
 	}
 }
 
@@ -179,6 +193,50 @@ EOF
 	}
 	if want := []int64{3, 1, 2}; !slices.Equal(ids, want) {
 		t.Errorf("ids = %v, want %v; every page, in the order gh printed them", ids, want)
+	}
+}
+
+// TestGhAPIMergesCheckPages covers the shape a busy commit produces: check-runs
+// is an object endpoint, so --paginate --slurp gives one object per page, each
+// repeating total_count. Reading only the first page would drop runs silently;
+// failing on the second would fail a healthy read. The real gh does exactly this
+// for any commit with more than a hundred check runs.
+func TestGhAPIMergesCheckPages(t *testing.T) {
+	gh := fakeGh(t, `cat <<'EOF'
+[{"total_count":3,"check_runs":[{"id":1,"name":"build","status":"completed","conclusion":"failure"}]},{"total_count":3,"check_runs":[{"id":2,"name":"build","status":"completed","conclusion":"success"},{"id":3,"name":"vet","status":"completed","conclusion":"success"}]}]
+EOF
+`)
+	var cs rawChecks
+	if err := ghAPI(gh)(context.Background(), "/x", &cs); err != nil {
+		t.Fatalf("ghAPI: %v", err)
+	}
+	if cs.TotalCount != 3 {
+		t.Errorf("TotalCount = %d, want 3", cs.TotalCount)
+	}
+	var got []int64
+	for _, c := range cs.CheckRuns {
+		got = append(got, c.ID)
+	}
+	if want := []int64{1, 2, 3}; !slices.Equal(got, want) {
+		t.Errorf("check ids = %v, want %v: both pages, in the order gh printed them", got, want)
+	}
+}
+
+// TestGhAPIMismatchedCheckTotalsIsAnError guards the join: pages that
+// disagree about total_count came from different reads, and merging them would
+// produce a World the server never had.
+func TestGhAPIMismatchedCheckTotalsIsAnError(t *testing.T) {
+	gh := fakeGh(t, `cat <<'EOF'
+[{"total_count":3,"check_runs":[{"id":1,"name":"build"}]},{"total_count":4,"check_runs":[{"id":2,"name":"vet"}]}]
+EOF
+`)
+	var cs rawChecks
+	err := ghAPI(gh)(context.Background(), "/x", &cs)
+	if err == nil {
+		t.Fatal("ghAPI succeeded, want an error naming the disagreeing counts")
+	}
+	if want := "page 2 says total_count 4, page 1 said 3"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
 	}
 }
 

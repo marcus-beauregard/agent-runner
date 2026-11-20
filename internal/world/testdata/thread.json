@@ -42,12 +42,14 @@
       "total_count": 2,
       "check_runs": [
         {
+          "id": 500,
           "name": "vet",
           "status": "completed",
           "conclusion": "success",
           "app": { "slug": "github-actions" }
         },
         {
+          "id": 400,
           "name": "build",
           "status": "completed",
           "conclusion": "failure",

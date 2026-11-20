@@ -58,11 +58,16 @@ func ghAPI(gh string) source {
 }
 
 // decodePages turns gh's array of pages into the value the caller asked for: a
-// list response becomes every page's elements joined, a single object response
-// becomes the one page gh printed.
+// list response becomes every page's elements joined, a check-runs response —
+// the one endpoint here that pages as objects, because check runs arrive as a
+// list wrapped in a count — becomes every page's runs joined, and any other
+// single object becomes the one page gh printed.
 func decodePages(pages []json.RawMessage, v any) error {
 	if len(pages) == 0 {
 		return nil
+	}
+	if cs, ok := v.(*rawChecks); ok {
+		return decodeCheckPages(pages, cs)
 	}
 	if first := bytes.TrimSpace(pages[0]); len(first) > 0 && first[0] == '[' {
 		joined, err := joinPages(pages)
@@ -75,6 +80,38 @@ func decodePages(pages []json.RawMessage, v any) error {
 		return fmt.Errorf("want one page of a single object, got %d", len(pages))
 	}
 	return json.Unmarshal(pages[0], v)
+}
+
+// decodeCheckPages joins the pages of a check-runs read. gh paginates that
+// endpoint as objects — one per page, each repeating total_count with a slice of
+// the runs — so decoding the pages as one object fails on the second page even
+// though every page was read. A commit with more than a hundred check runs is
+// ordinary on a busy repo, which is why this cannot wait for the count guard
+// further down: the read would die before reaching it.
+//
+// The count every page repeats has to agree. A page that disagrees came from a
+// different read, and joining two reads into one World would be a value that
+// never existed on the server.
+func decodeCheckPages(pages []json.RawMessage, out *rawChecks) error {
+	total := -1
+	var runs []rawCheck
+	for i, p := range pages {
+		var page rawChecks
+		if err := json.Unmarshal(p, &page); err != nil {
+			return fmt.Errorf("check-runs page %d: %w", i+1, err)
+		}
+		if total < 0 {
+			total = page.TotalCount
+		} else if page.TotalCount != total {
+			return fmt.Errorf("check-runs page %d says total_count %d, page 1 said %d", i+1, page.TotalCount, total)
+		}
+		runs = append(runs, page.CheckRuns...)
+	}
+	if total < 0 {
+		total = 0
+	}
+	*out = rawChecks{TotalCount: total, CheckRuns: runs}
+	return nil
 }
 
 // joinPages concatenates the elements of every page into one JSON array.
@@ -192,13 +229,16 @@ type rawReview struct {
 	User  rawLogin `json:"user"`
 }
 
+type rawCheck struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
 type rawChecks struct {
-	TotalCount int `json:"total_count"`
-	CheckRuns  []struct {
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	} `json:"check_runs"`
+	TotalCount int        `json:"total_count"`
+	CheckRuns  []rawCheck `json:"check_runs"`
 }
 
 type rawComment struct {
@@ -253,7 +293,7 @@ func (r rawReview) review() Review {
 func (r rawChecks) checks() []Check {
 	var cs []Check
 	for _, c := range r.CheckRuns {
-		cs = append(cs, Check{Name: c.Name, Conclusion: c.Conclusion, Status: c.Status})
+		cs = append(cs, Check{ID: c.ID, Name: c.Name, Conclusion: c.Conclusion, Status: c.Status})
 	}
 	return cs
 }

@@ -19,7 +19,7 @@ type World struct {
 	Issue    Issue     // never the zero value: every thread has an issue
 	PR       PR        // the zero value when the ref is an issue with no pull request
 	Reviews  []Review  // sorted by ID
-	Checks   []Check   // sorted by Name, ties in the order the API answered
+	Checks   []Check   // sorted by Name, ties by ID
 	Comments []Comment // sorted by ID
 }
 
@@ -79,6 +79,7 @@ type Review struct {
 
 // Check is one check run on the pull request's head commit.
 type Check struct {
+	ID         int64 // unique, and the tie-break when a name repeats
 	Name       string
 	Conclusion string
 	Status     string
@@ -125,11 +126,19 @@ func ParseRef(ref string) (owner, repo string, number int, err error) {
 // read the same thread produce the same value — and later the same digest —
 // whatever order the API happened to answer in.
 func sortWorld(w *World) {
-	// Reviews and comments sort on an id, which is unique, so the order is total
-	// whatever the sort does. Check names repeat — a commit that ran "build"
-	// twice has two of them — so that sort has to be stable, keeping the order
-	// the API answered in and the same order on the next read.
+	// Every one of these keys is a total order, which is the point: the value has
+	// to be the same on two reads of an unchanged thread, and a stable sort only
+	// promises to preserve the order it was handed. Check names repeat — a commit
+	// that ran "build" twice has two of them — and GitHub does not promise the
+	// same order for them on the next read, so the name alone would leave the
+	// value depending on the answer. The id is unique and stable; sort on that
+	// once the names are equal.
 	sort.Slice(w.Reviews, func(i, j int) bool { return w.Reviews[i].ID < w.Reviews[j].ID })
-	sort.SliceStable(w.Checks, func(i, j int) bool { return w.Checks[i].Name < w.Checks[j].Name })
+	sort.Slice(w.Checks, func(i, j int) bool {
+		if w.Checks[i].Name != w.Checks[j].Name {
+			return w.Checks[i].Name < w.Checks[j].Name
+		}
+		return w.Checks[i].ID < w.Checks[j].ID
+	})
 	sort.Slice(w.Comments, func(i, j int) bool { return w.Comments[i].ID < w.Comments[j].ID })
 }
