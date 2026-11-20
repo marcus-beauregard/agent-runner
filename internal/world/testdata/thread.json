@@ -1,0 +1,86 @@
+{
+  "pull": {
+    "/repos/octo/agent-runner/issues/7": {
+      "number": 7,
+      "title": "Record: thread reader builds the World",
+      "state": "open",
+      "body": "a body we do not keep",
+      "html_url": "https://github.com/octo/agent-runner/issues/7",
+      "user": { "login": "octocat" },
+      "pull_request": {
+        "url": "https://api.github.com/repos/octo/agent-runner/pulls/7",
+        "html_url": "https://github.com/octo/agent-runner/pull/7"
+      },
+      "assignees": [{ "login": "octocat" }, { "login": "hubot" }],
+      "labels": [{ "name": "record" }, { "name": "needs-tests" }]
+    },
+    "/repos/octo/agent-runner/pulls/7": {
+      "number": 7,
+      "draft": false,
+      "mergeable": true,
+      "mergeable_state": "clean",
+      "state": "open",
+      "body": "a body we do not keep",
+      "head": { "sha": "aaa111", "ref": "feat/world" },
+      "base": { "sha": "bbb222", "ref": "main" }
+    },
+    "/repos/octo/agent-runner/pulls/7/reviews": [
+      {
+        "id": 900,
+        "state": "APPROVED",
+        "body": "fine",
+        "user": { "login": "hubot" }
+      },
+      {
+        "id": 100,
+        "state": "CHANGES_REQUESTED",
+        "body": "needs a test",
+        "user": { "login": "octocat" }
+      }
+    ],
+    "/repos/octo/agent-runner/commits/aaa111/check-runs": {
+      "total_count": 2,
+      "check_runs": [
+        {
+          "name": "vet",
+          "status": "completed",
+          "conclusion": "success",
+          "app": { "slug": "github-actions" }
+        },
+        {
+          "name": "build",
+          "status": "completed",
+          "conclusion": "failure",
+          "app": { "slug": "github-actions" }
+        }
+      ]
+    },
+    "/repos/octo/agent-runner/issues/7/comments": [
+      {
+        "id": 30,
+        "created_at": "2026-11-20T09:00:00Z",
+        "body": "second",
+        "user": { "login": "hubot" }
+      },
+      {
+        "id": 10,
+        "created_at": "2026-11-19T09:00:00Z",
+        "body": "first",
+        "user": { "login": "marcus-beauregard" }
+      }
+    ]
+  },
+  "issue": {
+    "/repos/octo/agent-runner/issues/12": {
+      "number": 12,
+      "title": "Record: report <id> renders REPORT.md",
+      "state": "open",
+      "body": "a body we do not keep",
+      "html_url": "https://github.com/octo/agent-runner/issues/12",
+      "user": { "login": "octocat" },
+      "assignees": [],
+      "labels": [{ "name": "record" }]
+    },
+    "/repos/octo/agent-runner/issues/12/comments": []
+  }
+}
