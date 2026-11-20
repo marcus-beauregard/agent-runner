@@ -21,11 +21,38 @@ The second problem is what happens after the PR exists. A review arrives, or CI 
 3. **An agent.** Something with no hands calls the CLI, reads machine output, and decides what to do next.
 4. **Anyone reading the repo.** If the process is in the PRD and the code, the tool is legible without watching me work.
 
-## 3. Three commands
+## 3. One entry point, two drivers
 
-Two of them think. One of them only looks, and it is the one that runs all day.
+There is one way to do work and one way to find it. Everything else is a route inside `pass`.
 
-Every command is one invocation: it does a job and exits. Nothing here schedules itself.
+```
+agent-runner pass <url> --repo <path> [--dry-run] [--force <pipeline>] [--gate <cmd> ...] [--json]
+agent-runner watch --repo <path> --pr <url> [--issue <url>] [--interval 60s] [--for 30m | --once] [--json]
+```
+
+Every invocation does one job and exits. Nothing here schedules itself.
+
+### `pass` — one thread, one route
+
+The unit of work is a **thread**: an issue and the pull requests that reference it, together with what the ledger already knows about them. `pass` takes any URL inside that thread and resolves the whole thing, because work on one end invalidates the other. A maintainer answering the issue changes what an open PR should say; a review on the PR can make the issue's original ask obsolete.
+
+The subject is whatever the URL points at. The pipeline is chosen by what changed since the ledger last looked, not by the URL type:
+
+| Thread state, newer than the ledger | Pipeline |
+|---|---|
+| Issue open, unclaimed, unfixed, no PR | `build` — triage, reproduce, implement, gates, one commit, open the PR |
+| Issue open, PR open, maintainer commented on the **issue** | `revise` — re-read the scope, then amend the patch or say why it still stands |
+| Issue open, PR open, review activity on the **PR** | `resolve` — fix what is actionable, push, answer each point once |
+| PR approved, green, clean | nothing — exit `0`, the thread is with a human |
+| Issue closed, or fixed by a merged PR | nothing — drop the thread |
+| PR closed without a merge | `needs_human` — never open a replacement on its own authority |
+| Nothing new | nothing — exit `0` with `unchanged` |
+
+That last-but-two row matters as much as the silence rule. A run that quietly opens a fresh PR for a rejected one is the same failure as reopening it, one indirection further out.
+
+`--dry-run` prints the route and the reason it was chosen without executing anything, so "what would it do" is a question with a plain answer. `--force` pins a pipeline for the case where a human knows better; the ledger records that the route was overridden.
+
+`dev` and `resolve` survive as **presets** — `--force build` and `--force resolve` — for the person who wants to be explicit, and for scripts written before `pass` existed. They are not separate entry points, because the routing decision is exactly the classification `watch` already performs, and a second place to make it is a second place to drift.
 
 ### `watch` — the inbox, and no model
 
@@ -35,7 +62,9 @@ agent-runner watch --repo <path> --pr <url> [--issue <url>] [--interval 60s] [--
 
 Poll, digest, compare against the ledger, classify, enqueue at most one item. **No model is called.** A tick where nothing changed costs a few conditional requests and exits `0`.
 
-This is the part that runs on a timer, and it must be boring. A program that calls a model 288 times a day to discover that nothing happened is unaffordable, and worse, its behaviour changes with the weather. `watch` decides *whether* there is work and *what kind*; `dev` and `resolve` decide *how*.
+This is the part that runs on a timer, and it must be boring. A program that calls a model 288 times a day to discover that nothing happened is unaffordable, and worse, its behaviour changes with the weather. `watch` decides *whether* there is work and *what kind*; `pass` decides *how*.
+
+`watch` and `pass` share one classifier. `watch` runs it over a set and writes to the inbox; `pass` runs it over one thread and executes the answer. The enqueued item is literally the invocation — the same subject and the same pipeline name — so there is no translation layer between "work found" and "work done", and no way for the two to disagree.
 
 Polling is cheap because it is conditional. A request carrying `If-None-Match` that returns `304` does not count against the rate limit — measured on this account, two plain requests each cost one unit and a conditional `304` cost none. The ETag is a filter and never the recorded state: it is opaque and can churn without a semantic change, so the ledger stores a digest it can replay.
 
@@ -57,39 +86,27 @@ That table is the whole guard against a loop talking to itself, and it is code, 
 
 ### Watching the issue, not only the PR
 
-The expensive failure on the `dev` side is not a bad patch. It is a good patch to the wrong problem: implementing something a maintainer answered in a comment an hour earlier. So the issue is polled too, and its state cancels queued work.
+The expensive failure on the `build` side is not a bad patch. It is a good patch to the wrong problem: implementing something a maintainer answered in a comment an hour earlier. So the issue is polled too, and its state cancels queued work.
 
 | Observed on the issue | Effect |
 |---|---|
-| Closed by anyone | cancel; any queued `dev` item is dropped |
+| Closed by anyone | cancel; any queued `build` item is dropped |
 | Fixed by a merged PR referencing it | cancel |
 | Claimed by another account | cancel |
 | Labelled `wontfix`, `needs-discussion`, `invalid` | cancel |
-| A new comment from anyone who is not us | the next `dev` run re-reads before it implements |
+| A new comment from anyone who is not us | the next run re-reads before it implements or amends |
 
 The last row earns its keep. Scope announced before the run started is scope the run must not follow.
 
-### `dev` — from an issue to something reviewable
+### The pipelines are strict
 
-```
-agent-runner dev <issue-url> --repo <path> --gate <cmd> [--gate <cmd> ...] [--json]
-```
+Whichever route a run takes, its pipeline has a fixed stage list and does one job. Nothing improvises a stage, and nothing expands scope mid-review.
 
-Triage, reproduce, build, review, one commit on a new branch, open the PR. The subject is an issue. The terminal state is "a PR exists" or a refusal with a reason.
-
-### `resolve` — from an open PR to nothing left to do
-
-```
-agent-runner resolve <pr-url> --repo <path> [--gate <cmd> ...] [--max-attempts 3] [--json]
-```
-
-Read the PR, read the review thread and CI state, fix what is actionable, push, answer each distinct point once. The subject is a pull request. The terminal state is merged, closed, nothing actionable, or blocked on a human.
-
-`resolve` is **strictly responsive**. It does not improve the neighbourhood mid-review. If it spots something the reviewer did not raise, it says so in the reply and leaves the change to a separate `dev` run. A bot that silently expands scope inside somebody's review is untrustworthy, and trust is the only currency here.
+`resolve` is **strictly responsive**: it does not improve the neighbourhood while a reviewer is reading. If it spots something the reviewer did not raise, it says so in the reply and leaves the change to a separate `build` run. A bot that silently widens scope inside somebody's review is untrustworthy, and trust is the only currency here.
 
 ### The agentic shape
 
-A `dev` run produces the PR. A `resolve` run, invoked periodically by whatever is scheduling, keeps it moving until merged. The two are separate invocations on purpose: a dev run that also loops is a process that never ends, and a resolve run that also triages is a process that invents work.
+A `build` run produces the PR. A `revise` or `resolve` run, invoked by whatever is scheduling, keeps it moving until merged. They are separate invocations on purpose: a build run that also loops never ends, and a resolve run that also triages invents work.
 
 ### The clock belongs to the caller
 
@@ -190,7 +207,7 @@ Rules it will not break:
 - Deleting a worktree never deletes the branch on the remote. The PR is evidence; the checkout is scratch.
 - `--json` reports what was freed, per run, so the daily disk question has a number instead of a feeling.
 
-## 7. Pipeline: `dev`
+## 7. Pipeline: `build` (issue to PR)
 
 Each stage has one job and one completion criterion. A failed criterion ends the run with a report. It does not retry into the dark.
 
@@ -207,7 +224,24 @@ Each stage has one job and one completion criterion. A failed criterion ends the
 
 Stages 1 to 3 are cheap and local. They exist so stage 4 starts from a fact rather than a guess.
 
-## 8. Pipeline: `resolve`
+## 8. Pipelines: `revise` and `resolve`
+
+`resolve` answers the pull request. `revise` answers the issue, when a maintainer has said something on it that an open PR does not yet reflect. They are different pipelines because the input is different: a review comment names the change it wants, while an issue comment changes the ground the change stands on.
+
+### `revise`
+
+| # | Stage | Does | Done when |
+|---|---|---|---|
+| 1 | **Re-read** | The issue, every comment since the PR opened, and the current patch | You can state what the maintainer changed |
+| 2 | **Compare** | What the patch does against what was just asked for | The gap is named, or there is none |
+| 3 | **Decide** | Amend the patch, or leave it and say why it already satisfies the new scope | The decision is written down before any file changes |
+| 4 | **Amend** | Smallest change that closes the gap, or nothing at all | Gates pass, or the patch is untouched |
+| 5 | **Push** | Same branch, one commit per coherent group | Remote matches local |
+| 6 | **Say so** | One comment on the issue, quoting what was asked and what changed | The maintainer can see their point was read |
+
+Stage 3 is the one that keeps this honest. "The reviewer asked for X and the patch already does X" is a legitimate, useful outcome, and it costs one comment instead of a rewrite. "A maintainer said something, therefore rewrite" is how a run churns a patch that was already correct.
+
+### `resolve`
 
 | # | Stage | Does | Done when |
 |---|---|---|---|
@@ -261,7 +295,9 @@ The worker refuses, with a printed reason, when:
 - the gate cannot run in this sandbox (missing toolchain, network-only test);
 - the diff would touch a path outside the write scope;
 - a command tries to write outside the run directory, or reach a host outside the network allowlist;
-- `resolve` is pointed at a PR we do not own.
+- `resolve` is pointed at a PR we do not own;
+- a thread's PR was closed without merging, and the next step would be a replacement PR.
+- the route implies `--force` and the pipeline's preconditions do not hold.
 
 A refusal is a successful run. The failure mode to fear is a confident wrong PR, not a stop.
 
@@ -305,7 +341,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 |---|---|
 | Step-capped loop, transcript, tool registry | **done** — `internal/agent`, `internal/tools` (Go) |
 | argv-only command runner, flag allowlist, workdir confinement | **done** — Go port, race-tested, symlink escapes covered |
-| `dev`/`resolve` subcommands, `--dry-run` plan | **partial** — flags parse, plan prints, nothing executes |
+| `pass`/`watch` entry points, routing table, `--dry-run` | **missing** — `dev`/`resolve` flags parse and print a plan |
 | Run directory, ndjson record, `REPORT.md` | **missing** |
 | Event ledger: observations, actions, trigger spend | **missing** |
 | `watch`: conditional fetch, digest, classify, enqueue | **missing** — no model in this path |
@@ -329,7 +365,7 @@ Ordered so the property that matters is proven first. Determinism is not a miles
 - **M1 — resolve on a live PR.** One PR, one review round, guards enforced, and a silent world ending in `unchanged` with no notification. This is the first milestone where the program does something a prompt cannot.
 - **M2 — one repo, one issue.** Reproduce, implement, gates, commit on a worktree branch. No PR.
 - **M3 — PR back.** Push, `gh pr create`, refusal paths exercised, one PR in flight per repo enforced.
-- **M4 — dev end to end.** Stages 1 to 8 with a real client, `REPORT.md` rendered, resume proven by killing a run mid-stage.
+- **M4 — build end to end.** Stages 1 to 8 with a real client, `REPORT.md` rendered, resume proven by killing a run mid-stage.
 - **M5 — dogfood.** The worker takes the next three issues on my repos; the rotation only reviews what it produced.
 
 ## 17. Failure modes worth naming
