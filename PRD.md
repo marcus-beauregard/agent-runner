@@ -102,7 +102,32 @@ Each run gets its own worktree. Never the user's checkout, never a shared tree.
 - `git worktree add <run>/worktree -b agent/<slug> origin/<default>` — a fresh branch, always.
 - The run's write scope is that directory and nothing else. The existing argv-only command runner already confines the working directory; the PR must not be the first time we learn it did not.
 - Commands run with a scrubbed environment. Only what `gh` and `git` need to authenticate, and the transcript records that a command ran, never what it carried.
-- GC: a worktree is kept while the run is resumable, then pruned once its PR is merged or after 14 days. Disk is finite and this box has 25G.
+
+### 6.1 Cleanup is a step, not a background hope
+
+Nothing deletes anything on a timer. Cleanup is a command a person or a scheduler runs, in the same spirit as everything else here: one invocation, one job, exit.
+
+```
+agent-runner gc [--apply] [--runs <days>] [--worktrees <days>] [--json]
+```
+
+Default is a dry run. It prints every candidate with its size and the reason it qualifies, and deletes nothing until `--apply` is passed. A cleanup tool that acts before showing you its work is a cleanup tool nobody dares run.
+
+Two tiers, because they cost different things to lose:
+
+| Tier | What goes | Default age | Why |
+|---|---|---|---|
+| **Worktree** | `worktree/` and its git registration | merged/closed, or 14 days | Large (hundreds of MB), fully regenerable from the branch |
+| **Run record** | the whole run directory | 90 days, or the newest 50 runs | Small, and it is the history |
+
+Losing a worktree costs a re-clone. Losing a run record costs the reason a decision was made, so the two are never deleted under the same policy and the record always outlives the checkout.
+
+Rules it will not break:
+
+- A run with no terminal state is **resumable**, and is never collected unless `--force` names it explicitly.
+- A worktree whose run directory has already gone is an orphan: prune the directory and run `git worktree prune` on the parent repo, so the parent does not accumulate entries pointing at nothing.
+- Deleting a worktree never deletes the branch on the remote. The PR is evidence; the checkout is scratch.
+- `--json` reports what was freed, per run, so the daily disk question has a number instead of a feeling.
 
 ## 7. Pipeline: `dev`
 
@@ -200,6 +225,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 - A UI. The report is Markdown because Markdown is the interface.
 - An agent protocol. This is a batch process with a paper trail; interactive transports are a separate concern at one seam, stage 4's implementer, and they can be added there without changing the shape.
 - Owning a clock. Scheduling is the caller's problem by design.
+- Deleting anything on its own initiative. `gc` is a command with a dry run, and it is the only thing here that removes files.
 
 ## 15. What exists, what is missing
 
@@ -210,7 +236,8 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 | `dev`/`resolve` subcommands, `--dry-run` plan | **partial** — flags parse, plan prints, nothing executes |
 | Run directory, ndjson record, `REPORT.md` | **missing** |
 | Resume and stage idempotency | **missing** |
-| Worktree sandbox and GC | **missing** |
+| Worktree sandbox | **missing** |
+| `gc` with dry run, two tiers, orphan pruning | **missing** |
 | Real LLM client | **missing** — the loop runs on a deterministic mock |
 | Gate runner | **missing** |
 | `gh` and git operations | **missing** |
