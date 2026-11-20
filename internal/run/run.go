@@ -19,9 +19,21 @@ import (
 // rename leaves exactly that, and it is not state.
 var ErrNoRecord = errors.New("no run record")
 
-// stateRunning is the only state New writes. A run with no terminal state is
-// resumable, and the resume that looks for it is the next ticket.
+// stateRunning is what New writes. A record that still says running may belong
+// to a live process or to one that died between the mkdir and Finish, and the
+// difference is not knowable from the file: both are resumable (PRD §5), and gc
+// collects neither (§6.3).
 const stateRunning = "running"
+
+// The terminal states Finish writes. A crash and a considered stop must never
+// look the same in the record (PRD §10), so every exit the binary can return has
+// a name here rather than an anonymous failure.
+const (
+	stateDone       = "done"        // exit 0
+	stateRefused    = "refused"     // exit 3
+	stateNeedsHuman = "needs_human" // exit 4
+	stateFailed     = "failed"      // gate failed (2) or anything unexpected (1)
+)
 
 // Meta is what the caller knows about a run before it starts. Every field is
 // recorded verbatim; none of it is interpreted here.
@@ -105,9 +117,54 @@ func New(base string, meta Meta) (*Run, error) {
 	return &Run{ID: id, Dir: dir}, nil
 }
 
+// Finish writes the run's terminal outcome: the state its exit code stands for,
+// and the code itself. It runs once the result is known and before the process
+// exits, on every path that created a record — including a refusal, which is a
+// finished run and not an unfinished one. Without it a record says running for a
+// process that has already exited, which is state that lies.
+//
+// A run killed before Finish keeps the running state it was created with: that
+// is correct, because it was never finished and remains resumable.
+func (r *Run) Finish(code int) error {
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		return err
+	}
+	rec.State = terminalState(code)
+	rec.ExitCode = &code
+	return writeRecord(r.Dir, *rec)
+}
+
+// terminalState names the outcome an exit code stands for. Budget exhaustion is
+// not here yet: report.ExitCode does not return 5 until the budget work lands,
+// and inventing the state before the code that produces it would be the same
+// mistake in reverse.
+func terminalState(code int) string {
+	switch code {
+	case 0:
+		return stateDone
+	case 3:
+		return stateRefused
+	case 4:
+		return stateNeedsHuman
+	default:
+		return stateFailed
+	}
+}
+
 // Load reads the run recorded in dir. A missing, empty or unparseable run.json
 // is ErrNoRecord: the directory exists but carries no state to resume from.
 func Load(dir string) (*Run, error) {
+	rec, err := loadRecord(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &Run{ID: rec.ID, Dir: dir}, nil
+}
+
+// loadRecord reads and validates run.json, keeping every field: Finish rewrites
+// the whole record, so it must not be built from the two fields a caller sees.
+func loadRecord(dir string) (*record, error) {
 	b, err := os.ReadFile(filepath.Join(dir, "run.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -125,7 +182,7 @@ func Load(dir string) (*Run, error) {
 	if rec.ID == "" {
 		return nil, fmt.Errorf("%w: %s", ErrNoRecord, dir)
 	}
-	return &Run{ID: rec.ID, Dir: dir}, nil
+	return &rec, nil
 }
 
 // defaultBase resolves the state directory the record lives under.

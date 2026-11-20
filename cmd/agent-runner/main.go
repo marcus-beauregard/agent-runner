@@ -127,14 +127,29 @@ func work(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	if *runDir != "" {
-		r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo})
-		if err != nil {
-			return fail(err)
-		}
-		fmt.Printf("Run: %s\nDir: %s\n\n", r.ID, r.Dir)
+	if *runDir == "" {
+		return planAndPrint(ctx, ref, *repo, *gate)
 	}
-	plan, err := report.Work(ctx, ref, *repo, *gate)
+	r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo})
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Printf("Run: %s\nDir: %s\n\n", r.ID, r.Dir)
+	code := planAndPrint(ctx, ref, *repo, *gate)
+	if err := r.Finish(code); err != nil {
+		// The run happened; the record of how it ended did not. Say so instead of
+		// exiting on the result as though the record could be trusted.
+		fmt.Fprintf(os.Stderr, "agent-runner: record run outcome: %v\n", err)
+		return 1
+	}
+	return code
+}
+
+// planAndPrint plans the work, prints the plan, and returns the exit code for it.
+// Splitting it out lets the recorded path finalize its record whatever the
+// plan decided, refusals included.
+func planAndPrint(ctx context.Context, ref, repo, gate string) int {
+	plan, err := report.Work(ctx, ref, repo, gate)
 	fmt.Print(plan.String())
 	if err != nil {
 		return fail(err)

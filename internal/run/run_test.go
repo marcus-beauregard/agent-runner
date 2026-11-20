@@ -178,6 +178,68 @@ func TestNewRefusesFileBase(t *testing.T) {
 	}
 }
 
+// TestFinishRecordsOutcome is the bug a fresh read of the diff caught: New wrote
+// state running and nothing ever wrote it again, so every run the binary created
+// was durably recorded as still in flight — including the one that refused. A
+// refusal is a finished run; the record has to say which kind.
+func TestFinishRecordsOutcome(t *testing.T) {
+	tests := []struct {
+		name  string
+		code  int
+		state string
+	}{
+		{name: "success", code: 0, state: stateDone},
+		{name: "gate failed", code: 2, state: stateFailed},
+		{name: "refused", code: 3, state: stateRefused},
+		{name: "needs a human", code: 4, state: stateNeedsHuman},
+		{name: "unexpected", code: 1, state: stateFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			meta := Meta{Kind: "build", Subject: "https://example.test/issues/1", Repo: "/src/x"}
+			r, err := New(base, meta)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if err := r.Finish(tt.code); err != nil {
+				t.Fatalf("Finish(%d): %v", tt.code, err)
+			}
+			b, err := os.ReadFile(filepath.Join(r.Dir, "run.json"))
+			if err != nil {
+				t.Fatalf("read run.json: %v", err)
+			}
+			var got record
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatalf("run.json is not a record: %v", err)
+			}
+			if got.State != tt.state {
+				t.Errorf("state = %q, want %q", got.State, tt.state)
+			}
+			if got.ExitCode == nil || *got.ExitCode != tt.code {
+				t.Errorf("exit_code = %v, want %d", got.ExitCode, tt.code)
+			}
+			// Finish rewrites the record from what it read, so everything the
+			// caller supplied has to survive the rewrite.
+			if got.ID != r.ID || got.Kind != meta.Kind || got.Subject != meta.Subject || got.Repo != meta.Repo {
+				t.Errorf("Finish lost metadata: %+v", got)
+			}
+			if _, err := Load(r.Dir); err != nil {
+				t.Errorf("Load after Finish: %v", err)
+			}
+		})
+	}
+}
+
+// TestFinishRefusesUnusableRecord checks Finish does not invent a record where
+// there is none: a directory whose run.json never landed stays ErrNoRecord.
+func TestFinishRefusesUnusableRecord(t *testing.T) {
+	r := &Run{ID: "x", Dir: t.TempDir()}
+	if err := r.Finish(0); !errors.Is(err, ErrNoRecord) {
+		t.Fatalf("err = %v, want ErrNoRecord", err)
+	}
+}
+
 // TestLoad covers what counts as a record. An empty run.json is the shape a
 // crash between mkdir and rename leaves, and it must read as absent.
 func TestLoad(t *testing.T) {
