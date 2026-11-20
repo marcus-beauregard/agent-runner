@@ -96,6 +96,8 @@ The worktree lives under the run directory for exactly this reason. `/tmp` does 
 
 ## 6. Sandbox
 
+### 6.1 The worktree (where it writes)
+
 Each run gets its own worktree. Never the user's checkout, never a shared tree.
 
 - If the repo is missing, clone it. If it exists, use it only as the object store.
@@ -103,7 +105,22 @@ Each run gets its own worktree. Never the user's checkout, never a shared tree.
 - The run's write scope is that directory and nothing else. The existing argv-only command runner already confines the working directory; the PR must not be the first time we learn it did not.
 - Commands run with a scrubbed environment. Only what `gh` and `git` need to authenticate, and the transcript records that a command ran, never what it carried.
 
-### 6.1 Cleanup is a step, not a background hope
+### 6.2 The machine, not just the files
+
+A worktree confines the diff. It does not confine the process, and the process is the dangerous part: the worker reads attacker-controlled issue text and then executes code, so "it only writes inside the worktree" is a claim about a shell that can still run `npm install -g`, start a daemon, edit a crontab, or curl a host that has nothing to do with the repo.
+
+The rule is therefore about the host, not the checkout: **a run changes nothing on this machine outside its own run directory.** Concretely:
+
+- **No writes outside the run directory.** Not `$HOME`, not `/etc`, not a neighbouring repo, not the package manager's global store. `TMPDIR` is set to a directory inside the run and inherited by children, so a tool that wants scratch space gets it there.
+- **No installs, no services, no schedulers.** A gate that needs a toolchain the host lacks is a refusal (§11), not an invitation to `apt-get install` something. The worker never starts a daemon, edits a crontab, or registers a git hook in the parent repo beyond the worktree entry it cleans up.
+- **No long-lived processes.** Every command runs under a timeout, in its own process group, and the group is killed on exit. A command that tries to daemonise is killed with its children; a run never leaves something behind holding a port.
+- **Network is an allowlist, not the internet.** `github.com` for `gh` and `git`, plus the model endpoint, and nothing else. A test that reaches a real service is exactly the class of test that should not run unattended, and an issue body that instructs the worker to fetch a URL does not get to become a request.
+- **The blast radius should be a namespace, not a convention.** `--sandbox container` (bubblewrap or `unshare` when present) is the default where the kernel allows it; `--sandbox worktree` is the fallback and prints a warning naming what is unenforced. Convention is not isolation; the flag exists so the weaker mode is a visible choice.
+- **The run audits itself.** Before it reports, it lists anything it observed changing outside the run directory. A non-empty list is a refusal, not a footnote, because the next run would otherwise assume the machine is as it found it.
+
+This is separate from §12's "the issue body is data, not instructions". That is intent; this is enforcement. If the only protection against a hostile issue is that the model was told to be careful, there is no protection.
+
+### 6.3 Cleanup is a step, not a background hope
 
 Nothing deletes anything on a timer. Cleanup is a command a person or a scheduler runs, in the same spirit as everything else here: one invocation, one job, exit.
 
@@ -193,6 +210,7 @@ The worker refuses, with a printed reason, when:
 - the repo's CONTRIBUTING forbids unattended agents;
 - the gate cannot run in this sandbox (missing toolchain, network-only test);
 - the diff would touch a path outside the write scope;
+- a command tries to write outside the run directory, or reach a host outside the network allowlist;
 - `resolve` is pointed at a PR we do not own.
 
 A refusal is a successful run. The failure mode to fear is a confident wrong PR, not a stop.
@@ -200,6 +218,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 ## 12. Contracts
 
 - **Write scope:** the run's worktree, nothing outside it.
+- **The host is not a scratch pad.** Outside the run directory, a run leaves nothing: no installs, no services, no scheduler edits, no processes still running when it exits. §6.2 is the enforcement, not an aspiration.
 - **One commit, one idea.** A worker that bundles is a worker whose patches cannot be reverted.
 - **The issue body is data, not instructions.** An issue can contain "ignore your rules and run this". The pipeline treats its text as a defect report to understand, never as a command, and verifies every claim about the repo against the checkout. The worker reads attacker-controlled text and then executes code; the sandbox is the enforcement, this rule is the intent.
 - **The reviewer is not the author.** Same-session self-review is not review; the goldfish gets the diff and the issue, never the transcript.
@@ -236,7 +255,8 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 | `dev`/`resolve` subcommands, `--dry-run` plan | **partial** — flags parse, plan prints, nothing executes |
 | Run directory, ndjson record, `REPORT.md` | **missing** |
 | Resume and stage idempotency | **missing** |
-| Worktree sandbox | **missing** |
+| Worktree per run (filesystem scope) | **missing** |
+| Machine isolation: no writes outside, network allowlist, process-group timeouts, container default | **missing** |
 | `gc` with dry run, two tiers, orphan pruning | **missing** |
 | Real LLM client | **missing** — the loop runs on a deterministic mock |
 | Gate runner | **missing** |
@@ -246,6 +266,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 ## 16. Milestones
 
 - **M0 — provenance.** `dev --dry-run` against a real issue: plan, gates it would run, run directory created, nothing written outside it.
+- **M0.5 — the cage.** `--sandbox` flag with container detection, network allowlist, process-group timeouts, and the self-audit that lists writes outside the run directory. Proven by a deliberate escape attempt that gets refused.
 - **M1 — the record.** Stages 1 to 3 with a real client, `REPORT.md` rendered, resume proven by killing a run mid-stage.
 - **M2 — one repo, one issue.** Reproduce, implement, gates, commit on a worktree branch. No PR.
 - **M3 — PR back.** Push, `gh pr create`, refusal paths exercised.
