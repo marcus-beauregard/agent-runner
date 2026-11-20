@@ -16,6 +16,7 @@ import (
 
 	"github.com/marcus-beauregard/agent-runner/internal/agent"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
+	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 	"github.com/marcus-beauregard/agent-runner/internal/tools"
 )
 
@@ -108,6 +109,7 @@ func work(ctx context.Context, args []string) int {
 	repo := fs.String("repo", "", "path to an existing checkout (unused in the dry run)")
 	gate := fs.String("gate", "", "the command that decides whether the work is done")
 	dryRun := fs.Bool("dry-run", false, "plan only; write nothing")
+	runDir := fs.String("run-dir", "", "base directory for the run record (default: the user state directory)")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usage(os.Stdout)
@@ -125,6 +127,13 @@ func work(ctx context.Context, args []string) int {
 		return 1
 	}
 
+	if *runDir != "" {
+		r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo})
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Printf("Run: %s\nDir: %s\n\n", r.ID, r.Dir)
+	}
 	plan, err := report.Work(ctx, ref, *repo, *gate)
 	fmt.Print(plan.String())
 	if err != nil {
@@ -144,7 +153,7 @@ func usage(w io.Writer) {
 
 Usage:
   agent-runner run <task>                                        run the offline mock agent
-  agent-runner work <issue-url> --repo <path> [--gate <cmd>] --dry-run
+  agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>] --dry-run
                                                                  plan the work, write nothing
   agent-runner --help                                            show this help
   agent-runner --version                                         print the version
