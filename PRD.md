@@ -174,13 +174,19 @@ Stages 1 to 3 are cheap and local. They exist so stage 4 starts from a fact rath
 | 5 | **Answer** | One reply per distinct point, referencing what changed | No comment answered twice |
 | 6 | **Report** | What changed, what was answered, what is left | The next run can see it did not repeat itself |
 
-### The leash
+### The guards
 
-A resolve loop that runs on a timer will, left alone, say the same thing every thirty minutes. Three rules, enforced in code, not in a prompt:
+A resolve loop on a timer will, left alone, act when there is nothing to do. That is not malice; it is that a schedule looks like an instruction. Every guard below is enforced in code and has a test.
 
-- **Stop on no progress.** If two consecutive attempts produce no new commit and no new state, stop with `blocked` and say why.
-- **One reply per point.** Answered comments are recorded by id in the run record and never answered twice, across runs.
-- **Never push to a branch we do not own.** If the PR author is not the authenticated account, `resolve` refuses. That single check prevents the worst outcome in this design.
+- **The world is the input, not the clock.** Before acting, the run digests the PR's observable state: head and base sha, draft and mergeable flags, every check by name and conclusion, every review by id and state, every comment by id and author, every unresolved thread id. If the digest matches the previous run's, the run exits `0` with `unchanged`. Two people asleep produce no digest change, so the loop does nothing for as long as they sleep.
+- **Our own events are not state changes.** Comments, reviews and pushes authored by the authenticated account are excluded from the digest. Without this the loop reads its own output as news and answers itself forever.
+- **Every action spends a trigger.** An outbound write must cite the event id it answers, and an id can be spent once, recorded in the ledger. A retry, a replay or a later scheduled run finds the trigger spent and does nothing.
+- **Response only.** The action set is closed: fix a `CHANGES_REQUESTED` review, answer a new question once, repair a check that went red on our head, rebase a conflict. Nothing in it is "ask for attention". Requesting review or merge, bumping, `@`-mentioning, "any update?", close/reopen, and opening a replacement PR for a rejected branch are absent from the code, rather than discouraged in a prompt.
+- **Approval ends the run.** An approved, green, conflict-free PR is finished. The worker does not seek the merge; merging belongs to a person (§12). Silence is also an ending: exit `0` and say nothing.
+- **Two failures are a stop.** If two consecutive attempts from the same world fail to change it, exit `blocked` with the reason. A third try is a third notification.
+- **One PR in flight per repo.** Review is the scarce resource. A second open worker PR in a repo that already has one awaiting review doubles a maintainer's cost for no gain.
+- **Never push to a branch we do not own.** If the PR author is not the authenticated account, `resolve` refuses.
+- **Replay proves it.** `replay <run-dir>` recomputes the plan from the recorded observations with writes suppressed, and the action set must match the recorded one. Determinism is a golden test, not a property of the prompt.
 
 ## 9. Gates
 
@@ -225,6 +231,8 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 - **Never merge.** The worker's authority ends at a PR. Merging belongs to a person or a maintainer.
 - **No secrets in the transcript.** Tokens come from the environment; the record shows that a command ran.
 - **No self-scheduling.** One invocation, one job, exit.
+- **Never ask for anything.** The worker produces work and answers questions. Requests for review, for merge, for attention or for urgency are not in its vocabulary; a person decides when the work is looked at, and their clock is not ours to hurry.
+- **The ledger is the state.** Every run reads the previous ledger and writes one. Nothing is remembered in a process, a scratchpad or a prompt, so a run can be replayed and two runs cannot disagree about what happened.
 
 ## 13. Exit codes
 
@@ -254,6 +262,8 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 | argv-only command runner, flag allowlist, workdir confinement | **done** — Go port, race-tested, symlink escapes covered |
 | `dev`/`resolve` subcommands, `--dry-run` plan | **partial** — flags parse, plan prints, nothing executes |
 | Run directory, ndjson record, `REPORT.md` | **missing** |
+| Event ledger: observations, actions, trigger spend | **missing** |
+| `replay` from a recorded run | **missing** |
 | Resume and stage idempotency | **missing** |
 | Worktree per run (filesystem scope) | **missing** |
 | Machine isolation: no writes outside, network allowlist, process-group timeouts, container default | **missing** |
@@ -265,18 +275,30 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 
 ## 16. Milestones
 
-- **M0 — provenance.** `dev --dry-run` against a real issue: plan, gates it would run, run directory created, nothing written outside it.
-- **M0.5 — the cage.** `--sandbox` flag with container detection, network allowlist, process-group timeouts, and the self-audit that lists writes outside the run directory. Proven by a deliberate escape attempt that gets refused.
-- **M1 — the record.** Stages 1 to 3 with a real client, `REPORT.md` rendered, resume proven by killing a run mid-stage.
-- **M2 — one repo, one issue.** Reproduce, implement, gates, commit on a worktree branch. No PR.
-- **M3 — PR back.** Push, `gh pr create`, refusal paths exercised.
-- **M4 — resolve.** One PR, one review round, leash enforced (no-progress stop, no duplicate replies).
-- **M5 — dogfood.** The worker takes the next three issues on my repos; the hourly rotation only reviews what it produced.
+Ordered so the property that matters is proven first. Determinism is not a milestone; it is the acceptance test every milestone after M0 must keep passing.
 
-## 17. How we know it works
+- **M0 — the ledger.** Append-only events, the world digest, trigger spend, and `replay`. Proven by three fixtures taken from real failures: a PR whose newest event is our own comment with no human reply, a PR we closed, and a PR whose review we already answered. Each must plan zero actions and exit `0`.
+- **M0.5 — the cage.** `--sandbox` with container detection, network allowlist, process-group timeouts, and the self-audit that lists writes outside the run directory. Proven by a deliberate escape attempt that gets refused.
+- **M1 — resolve on a live PR.** One PR, one review round, guards enforced, and a silent world ending in `unchanged` with no notification. This is the first milestone where the program does something a prompt cannot.
+- **M2 — one repo, one issue.** Reproduce, implement, gates, commit on a worktree branch. No PR.
+- **M3 — PR back.** Push, `gh pr create`, refusal paths exercised, one PR in flight per repo enforced.
+- **M4 — dev end to end.** Stages 1 to 8 with a real client, `REPORT.md` rendered, resume proven by killing a run mid-stage.
+- **M5 — dogfood.** The worker takes the next three issues on my repos; the rotation only reviews what it produced.
+
+## 17. Failure modes worth naming
+
+Three things went wrong in practice, before this program existed, and each one has a guard above because the shape recurs.
+
+- **The loop answers its own comment.** A comment it wrote looks like activity, so the next scheduled run replies again, and the one after that. Fix: our events are excluded from the digest, and a trigger can be spent once.
+- **Nobody is awake, so it applies pressure.** A maintainer asleep at 03:00 is not a stalled PR. A loop that reads silence as a problem to solve will ask for a merge, then ask again. Fix: requests do not exist in the action set; an approved PR is a finished run.
+- **A wall closes and it tries the door.** Close/reopen three times on one PR, each attempt a notification to someone who did not ask. Fix: those verbs are absent from the code, and a repeated failure from the same world is a `blocked` exit.
+
+## 18. How we know it works
 
 - **Unattended-to-merged rate** — PRs opened by the worker that a maintainer merges without a second round of review.
 - **Gate-first accuracy** — share of runs where the repo's own gate agreed with the worker's claim on the first try.
 - **Refusals that were right** — of the runs that stopped, how many a human agreed should have stopped.
 - **Resume honesty** — runs interrupted on purpose that finished correctly when resumed, without repeating a side effect.
 - **Cost per merged PR**, counted from the run records rather than from memory.
+- **Replay fidelity** — runs whose recomputed plan matches the recorded one, across the fixture set. It belongs at 100%; anything lower means the loop responded to something the record does not contain.
+- **Wordless runs** — resolve invocations that ended `unchanged` and produced no notification. A high number is the product working: the loop is on a timer and the humans are asleep.
