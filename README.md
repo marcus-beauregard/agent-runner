@@ -3,25 +3,25 @@
 [![CI](https://github.com/marcus-beauregard/agent-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/marcus-beauregard/agent-runner/actions/workflows/ci.yml)
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
 
-An agent runtime, and the worker built on it: hand it an issue or a pull request, get back something a maintainer can review, with a run record a stranger can pick up.
+Point it at an issue or a pull request. It works, runs the repo's own gates, and leaves something a maintainer can review, plus a run record of what it did.
 
-**Status: early.** The loop, the tool registry and the hardened command runner work. The worker is specified and mostly not built; `dev` and `resolve` parse their flags and print a plan. The planner is a deterministic mock, so no model is called yet. Nothing here is ready to point at somebody else's repository.
+**Status: early.** The loop, the tool registry and the command runner work. The worker is specified and mostly unbuilt. `dev` and `resolve` parse flags and print a plan (the planner is a deterministic mock, so no model is called yet). Do not aim this at someone else's repository.
 
-Where it is going is written down in [PRD.md](PRD.md), which is the source of truth for behaviour. This README is the front door; that file is the design.
+What it is meant to become is in [PRD.md](PRD.md). That file is the source of truth for behaviour; this one is a signpost.
 
 ## Layout
 
-The canonical Go layout, and nothing invented:
+Plain Go layout, nothing invented:
 
 ```
 cmd/agent-runner/     the binary
 internal/agent/       the loop: plan, act, observe, reflect
 internal/tools/       tool registry and the argv-only command runner
-internal/policy/      what a tool is allowed to do
+internal/policy/      what a tool may do
 internal/report/      plans and run reports
 ```
 
-Everything lives under `internal/` on purpose. There is no public API to keep compatible while the design is still moving.
+Everything sits under `internal/` because the design still moves and there is no API to keep compatible.
 
 ## Build and test
 
@@ -33,7 +33,7 @@ go test -race ./...
 
 The default entry point runs offline against the mock planner, so a run is reproducible without a key.
 
-Gates, and CI runs all three:
+CI runs these three:
 
 ```bash
 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...
@@ -41,9 +41,9 @@ test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...
 
 ## Contributing
 
-Humans and automated agents are both welcome. No CLA; every commit carries a DCO sign-off (`git commit -s`).
+Humans and automated agents both. No CLA; commits carry a DCO sign-off (`git commit -s`).
 
-Two rules matter more than the rest: **keep changes small**, and **open an issue before writing code** unless the change is a one-liner. [CONTRIBUTING.md](CONTRIBUTING.md) has the full set, and [AGENTS.md](AGENTS.md) is the same contract written for coding agents.
+Keep changes small, and open an issue before writing code unless the fix is one obvious line. [CONTRIBUTING.md](CONTRIBUTING.md) has the details, and [AGENTS.md](AGENTS.md) is the same contract written for coding agents.
 
 ## Licence
 
