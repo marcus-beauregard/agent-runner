@@ -10,9 +10,9 @@
 
 The pipeline that produced this year's merges lives in a chat session. Read the issue, check it is not already fixed, reproduce, patch, run the repo's gates, get a second opinion, commit, open the PR. Every step exists as prose in an automation prompt, so every run re-derives it and the quality drift is invisible until a maintainer says no.
 
-That is the wrong place for a repeatable process. The process should be code: versioned, testable, and able to run on a box with no conversation attached.
+A repeatable process belongs in code: versioned, testable, runnable on a box with no conversation attached.
 
-The second problem is what happens after the PR exists. A review arrives, or CI fails, and the work resumes in somebody's head. Two days later nobody can say what was already answered and what was skipped, and the same comment gets a second reply. That is not a tooling gap, it is a missing record.
+The second problem is what happens after the PR exists. A review arrives, or CI fails, and the work resumes in somebody's head. Two days later nobody can say what was answered and what was skipped, and the same comment gets a second reply. The tooling is fine; nothing records what happened.
 
 ## 2. Who it is for
 
@@ -41,7 +41,7 @@ Nothing chooses which of the three to run. That is the caller's job, and the rea
 
 ### The thread is the unit, even for one command
 
-A command takes one URL and follows the thread from it: the issue and the pull requests that cite it, together, with whatever the ledger already knows. That is not routing; it is reading enough context to do the job honestly. A maintainer answering the issue changes what an open PR should say, and a review on the PR can make the issue's original ask obsolete. Neither can be judged from one URL alone.
+A command takes one URL and follows the thread from it: the issue and the pull requests that cite it, together, with whatever the ledger already knows. A maintainer answering the issue changes what an open PR should say, and a review on the PR can make the issue's original ask obsolete. Neither can be judged from one URL alone, and reading the other side costs one API call.
 
 Where a thread disagrees with the command, the command loses:
 
@@ -53,22 +53,22 @@ Where a thread disagrees with the command, the command loses:
 | PR closed without a merge, and a replacement would be the next step | refuse, `needs_human` — exit `4` |
 | Nothing newer than the ledger | exit `0` with `unchanged` |
 
-That fourth row matters as much as the silence rule. A command that quietly opens a fresh PR for a rejected one is the same failure as reopening it, one indirection further out.
+The fourth row is the one that gets skipped. Opening a fresh PR for a rejected one repeats the reopening failure one indirection further out.
 
 ### Every command is safe to run twice
 
-This is what replaces a watcher, and it is the only defence that still works when somebody else's scheduler is careless:
+Four properties make a command safe to call from a loop somebody else wrote:
 
 - **Read before acting.** The command digests the thread's observable state — head and base sha, checks by name and conclusion, reviews by id and state, comments by id and author — and compares it with the ledger. Nothing newer means exit `0` with `unchanged`, no model call, no writes.
-- **Our own events are not state changes.** Anything authored by the authenticated account is excluded from the digest, so a command cannot read its own comment as news and answer it. This is the whole guard against talking to itself.
+- **Our own events are not state changes.** Anything authored by the authenticated account is excluded from the digest, so a command cannot read its own comment as news and answer it.
 - **Every action spends a trigger.** An outbound write cites the event id it answers, and an id can be spent once, in the ledger. A retry, a replay or a caller's loop finds it spent and does nothing.
 - **Silence is a result.** A command that finds nothing to do exits `0` and says nothing to anyone but its caller.
 
-A caller may run these as often as it likes. Running one twice costs a handful of conditional requests and changes nothing, which is the property that makes an external scheduler safe rather than something to be afraid of.
+A caller may run these as often as it likes. Running one twice costs a handful of conditional requests and changes nothing.
 
 ### The issue is part of the job, not a separate watch
 
-The expensive failure on the `build` side is not a bad patch. It is a good patch to the wrong problem: implementing something a maintainer answered in a comment an hour earlier. So `build` reads the issue's comments as part of stage 1, and refuses when the issue already moved:
+The expensive failure on the `build` side is a good patch to the wrong problem: work on something a maintainer answered in a comment an hour earlier. So `build` reads the issue comments as part of stage 1 and refuses when the issue already moved:
 
 | Seen while reading the issue | Effect |
 |---|---|
@@ -78,13 +78,13 @@ The expensive failure on the `build` side is not a bad patch. It is a good patch
 | Labelled `wontfix`, `needs-discussion`, `invalid` | refuse |
 | A comment newer than the claim, from someone else | re-read it, and implement what it says |
 
-The last row is the one that earns its keep. Scope announced before the run started is scope the run must follow, and it costs one API call to find out.
+The last row is the cheap one. Scope announced before the run started is scope the run has to follow, and finding out takes one call.
 
 ### Each pipeline is a chain, and it is strict
 
 Each command runs a fixed stage list and does one job. Nothing improvises a stage, and nothing expands scope mid-review. Stages share one tool set and one record shape, which is what lets the three commands be run back to back without a translation layer between them.
 
-`resolve` is **strictly responsive**: it does not improve the neighbourhood while a reviewer is reading. If it spots something the reviewer did not raise, it says so in the reply and leaves the change to a separate `build` run. A bot that silently widens scope inside somebody's review is untrustworthy, and trust is the only currency here.
+`resolve` is **strictly responsive**: it does not improve the neighbourhood while a reviewer is reading. If it spots something the reviewer did not raise, it says so in the reply and leaves the change to a separate `build` run. Widening scope inside somebody's review is how a contributor stops being asked back.
 
 ### The agentic shape
 
@@ -94,7 +94,7 @@ Each command runs a fixed stage list and does one job. Nothing improvises a stag
 
 This tool does not schedule itself. One invocation runs one job and exits. Looping belongs to the user's shell, an agent's planner, or a meta-framework above this one.
 
-That is a deliberate boundary, not an omission, and it is the difference between a tool and a service. A process that stays running has to answer questions that are not about the work: when to retry, whether the last run is still going, what a stale lock means, what to do when the same thread is picked twice. Those belong to the layer that knows what it wants to spend and on what. Keeping them out is what keeps the pipelines testable, and what lets the same commands run from a shell, a cron, a queue worker or a person's terminal without a single conditional in the code.
+A process that stays running has to answer questions that are not about the work: when to retry, whether the last run is still going, what a stale lock means, what to do when the same thread is picked twice. Those belong to the layer that knows what it wants to spend. Keeping them out keeps the pipelines testable, and lets the same commands run from a shell, a cron, a queue worker or a terminal with no conditional in the code.
 
 `agent-runner runs --json` exists so an external scheduler can see what is in flight and decide.
 
@@ -118,11 +118,11 @@ ${XDG_STATE_HOME:-~/.local/state}/agent-runner/runs/<id>/
   worktree/          the checkout this run is allowed to touch
 ```
 
-Two views, one source of truth:
+Three ways to read the same events:
 
-- **run.ndjson** is the machine interface. One JSON object per line, append-only, flushed as it happens. It survives truncation by losing only the tail.
-- **REPORT.md** is the human interface, rendered from the same events by `agent-runner report <id>`.
-- **`--json`** prints one object at exit: run id, mode, status, exit code, gate result, report path, PR URL if any. No TTY assumptions, no prompts, no colour.
+- **run.ndjson** for machines. One JSON object per line, append-only, flushed as it happens, so a truncated file loses only its tail.
+- **REPORT.md** for people, rendered from the same events by `agent-runner report <id>`.
+- **`--json`** at exit, one object: run id, mode, status, exit code, gate result, report path, PR URL if any. No TTY assumptions, no prompts, no colour.
 
 Runs live outside the repo on purpose. A `.agent-runner/` directory inside every checkout is one careless `git add -A` away from committing a transcript containing paths, code and half-finished reasoning. The repo gets at most a single gitignored pointer listing run ids, and the runner works fine without it.
 
@@ -163,7 +163,7 @@ The rule is therefore about the host, not the checkout: **a run changes nothing 
 - **The blast radius should be a namespace, not a convention.** `--sandbox container` (bubblewrap or `unshare` when present) is the default where the kernel allows it; `--sandbox worktree` is the fallback and prints a warning naming what is unenforced. Convention is not isolation; the flag exists so the weaker mode is a visible choice.
 - **The run audits itself.** Before it reports, it lists anything it observed changing outside the run directory. A non-empty list is a refusal, not a footnote, because the next run would otherwise assume the machine is as it found it.
 
-This is separate from §12's "the issue body is data, not instructions". That is intent; this is enforcement. If the only protection against a hostile issue is that the model was told to be careful, there is no protection.
+This is separate from §12's "the issue body is data, not instructions": that rule states intent, this one enforces it. If the only protection against a hostile issue is that the model was told to be careful, there is no protection.
 
 ### 6.3 Cleanup is a step, not a background hope
 
@@ -173,9 +173,9 @@ Nothing deletes anything on a timer. Cleanup is a command a person or a schedule
 agent-runner gc [--apply] [--runs <days>] [--worktrees <days>] [--json]
 ```
 
-Default is a dry run. It prints every candidate with its size and the reason it qualifies, and deletes nothing until `--apply` is passed. A cleanup tool that acts before showing you its work is a cleanup tool nobody dares run.
+Default is a dry run. It prints every candidate with its size and the reason it qualifies, and deletes nothing until `--apply` is passed.
 
-Two tiers, because they cost different things to lose:
+Two tiers, because they cost different things to lose.
 
 | Tier | What goes | Default age | Why |
 |---|---|---|---|
@@ -210,7 +210,7 @@ Stages 1 to 3 are cheap and local. They exist so stage 4 starts from a fact rath
 
 ## 8. Pipelines: `resolve` and `amend`
 
-`resolve` answers the pull request. `amend` answers the issue, when a maintainer has said something on it that an open PR does not yet reflect. They are different pipelines because the input is different: a review comment names the change it wants, while an issue comment changes the ground the change stands on.
+`resolve` answers the pull request. `amend` answers the issue, when a maintainer has said something on it that an open PR does not yet reflect. They are different pipelines because the input is different. A review comment names the change it wants; an issue comment can change what the change should be.
 
 ### `amend`
 
@@ -238,13 +238,13 @@ Stage 3 is the one that keeps this honest. "The reviewer asked for X and the pat
 
 ### The guards
 
-A resolve loop on a timer will, left alone, act when there is nothing to do. That is not malice; it is that a schedule looks like an instruction. Every guard below is enforced in code and has a test.
+A resolve loop on a timer will act when there is nothing to do, because a schedule looks like an instruction. Each guard below is enforced in code and has a test.
 
 - **The world is the input, not the clock.** Before acting, the run digests the PR's observable state: head and base sha, draft and mergeable flags, every check by name and conclusion, every review by id and state, every comment by id and author, every unresolved thread id. If the digest matches the previous run's, the run exits `0` with `unchanged`. Two people asleep produce no digest change, so the loop does nothing for as long as they sleep.
 - **Our own events are not state changes.** Comments, reviews and pushes authored by the authenticated account are excluded from the digest. Without this the loop reads its own output as news and answers itself forever.
 - **Every action spends a trigger.** An outbound write must cite the event id it answers, and an id can be spent once, recorded in the ledger. A retry, a replay or a later scheduled run finds the trigger spent and does nothing.
 - **Response only.** The action set is closed: fix a `CHANGES_REQUESTED` review, answer a new question once, repair a check that went red on our head, rebase a conflict. Nothing in it is "ask for attention". Requesting review or merge, bumping, `@`-mentioning, "any update?", close/reopen, and opening a replacement PR for a rejected branch are absent from the code, rather than discouraged in a prompt.
-- **Approval ends the run.** An approved, green, conflict-free PR is finished. The worker does not seek the merge; merging belongs to a person (§12). Silence is also an ending: exit `0` and say nothing.
+- **Approval ends the run.** An approved, green, conflict-free PR is finished. The worker does not seek the merge, because merging belongs to a person (§12). Finding nothing to do also ends a run: exit `0`, say nothing.
 - **Two failures are a stop.** If two consecutive attempts from the same world fail to change it, exit `blocked` with the reason. A third try is a third notification.
 - **One PR in flight per repo.** Review is the scarce resource. A second open worker PR in a repo that already has one awaiting review doubles a maintainer's cost for no gain.
 - **Never push to a branch we do not own.** If the PR author is not the authenticated account, `resolve` refuses.
@@ -283,7 +283,7 @@ The worker refuses, with a printed reason, when:
 - a thread's PR was closed without merging, and the next step would be a replacement PR.
 - the route implies `--force` and the pipeline's preconditions do not hold.
 
-A refusal is a successful run. The failure mode to fear is a confident wrong PR, not a stop.
+A refusal is a successful run. Stopping costs a maintainer nothing; a confident wrong PR costs them a review.
 
 ## 12. Contracts
 
@@ -318,7 +318,7 @@ A refusal is a successful run. The failure mode to fear is a confident wrong PR,
 - An agent protocol. This is a batch process with a paper trail; interactive transports are a separate concern at one seam, stage 4's implementer, and they can be added there without changing the shape.
 - Owning a clock. Scheduling is the caller's problem by design.
 - Watchers, daemons, pollers, queues, leases or work-in-progress limits. Those are the meta framework's job: it decides which thread gets a command and when. A `watch` command inside this binary would be the first step of turning a tool into a service, and the moment that happens the pipelines stop being testable in isolation.
-- Deciding which of the three commands to run. Routing on "what changed" looks helpful and is the caller's judgement wearing a hat.
+- Deciding which of the three commands to run. Routing on "what changed" looks helpful and duplicates a decision the caller has to make anyway.
 - Deleting anything on its own initiative. `gc` is a command with a dry run, and it is the only thing here that removes files.
 
 ## 14.1 Where the meta framework goes
@@ -339,10 +339,9 @@ If a scheduler needs more than that, the scheduler is doing something the pipeli
 |---|---|
 | Step-capped loop, transcript, tool registry | **done** — `internal/agent`, `internal/tools` (Go) |
 | argv-only command runner, flag allowlist, workdir confinement | **done** — Go port, race-tested, symlink escapes covered |
-| `build`/`resolve`/`amend` commands, thread reading, `--dry-run` | **partial** — `dev`/`resolve` flags parse and print a plan |
+| `build`/`resolve`/`amend` commands, thread reading, `--dry-run` | **partial** — `build`/`resolve` flags parse and print a plan |
 | Run directory, ndjson record, `REPORT.md` | **missing** |
-| Event ledger: observations, actions, trigger spend | **missing** |
-| Idempotence: digest, own-event exclusion, trigger spend | **missing** |
+| Event ledger, and idempotence: digest, own-event exclusion, trigger spend | **missing** |
 | `amend` pipeline | **missing** |
 | `replay` from a recorded run | **missing** |
 | Resume and stage idempotency | **missing** |
@@ -365,11 +364,11 @@ Ordered so the property that matters is proven first. Determinism is not a miles
 - **M2 — one repo, one issue.** Reproduce, implement, gates, commit on a worktree branch. No PR.
 - **M3 — PR back.** Push, `gh pr create`, refusal paths exercised, one PR in flight per repo enforced.
 - **M4 — build end to end.** Stages 1 to 8 with a real client, `REPORT.md` rendered, resume proven by killing a run mid-stage.
-- **M5 — dogfood.** The worker takes the next three issues on my repos; the rotation only reviews what it produced.
+- **M5 — dogfood.** The worker takes the next three issues on my repos, and I review what it produces.
 
 ## 17. Failure modes worth naming
 
-Three things went wrong in practice, before this program existed, and each one has a guard above because the shape recurs. All three came from a loop that ran on its own timer; two of them are impossible here now that the timer lives outside, and the third is the reason the digest exists.
+Three things went wrong in practice before this program existed, and each has a guard above. All three came from a loop on its own timer. Two cannot happen here now that the timer lives outside, and the third is why the digest exists.
 
 - **The loop answers its own comment.** A comment it wrote looks like activity, so the next scheduled run replies again, and the one after that. Fix: our events are excluded from the digest, and a trigger can be spent once.
 - **Nobody is awake, so it applies pressure.** A maintainer asleep at 03:00 is not a stalled PR. A loop that reads silence as a problem to solve will ask for a merge, then ask again. Fix: requests do not exist in the action set; an approved PR is a finished run. The timer being someone else's makes this rarer, not impossible — a careless cron is still a cron.
@@ -377,10 +376,10 @@ Three things went wrong in practice, before this program existed, and each one h
 
 ## 18. How we know it works
 
-- **Unattended-to-merged rate** — PRs opened by the worker that a maintainer merges without a second round of review.
-- **Gate-first accuracy** — share of runs where the repo's own gate agreed with the worker's claim on the first try.
-- **Refusals that were right** — of the runs that stopped, how many a human agreed should have stopped.
-- **Resume honesty** — runs interrupted on purpose that finished correctly when resumed, without repeating a side effect.
+- **Unattended-to-merged rate.** PRs opened by the worker that a maintainer merges without a second round of review.
+- **Gate-first accuracy.** Share of runs where the repo's own gate agreed with the worker's claim on the first try.
+- **Refusals that were right.** Of the runs that stopped, how many a human agreed should have stopped.
+- **Resume honesty.** Runs interrupted on purpose that finished correctly when resumed, without repeating a side effect.
 - **Cost per merged PR**, counted from the run records rather than from memory.
-- **Replay fidelity** — runs whose recomputed plan matches the recorded one, across the fixture set. It belongs at 100%; anything lower means the loop responded to something the record does not contain.
-- **Wordless runs** — invocations that ended `unchanged` and notified nobody. A high number means the caller is polling more than the world is changing, which is exactly the state a scheduler should reach overnight. It is measured by whoever is calling, from the exit codes; this binary just reports them honestly.
+- **Replay fidelity.** Runs whose recomputed plan matches the recorded one, across the fixture set. It belongs at 100%; anything lower means the loop responded to something the record does not contain.
+- **Wordless runs** — invocations that ended `unchanged` and notified nobody. A high number means the caller is polling more than the world is changing, which is exactly the state a scheduler should reach overnight. Whoever is calling measures it from the exit codes; this binary only reports them.
