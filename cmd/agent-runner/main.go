@@ -16,6 +16,7 @@ import (
 
 	"github.com/marcus-beauregard/agent-runner/internal/agent"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
+	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 	"github.com/marcus-beauregard/agent-runner/internal/tools"
 )
 
@@ -91,8 +92,9 @@ func runAgent(ctx context.Context, args []string) int {
 }
 
 // work runs the M0 dry-run: it plans the change and prints the gate it would
-// run, writing nothing. The issue URL is the leading positional argument, so it
-// is consumed before the flag set, which stops at the first non-flag.
+// run, writing nothing except the run record when --run-dir asks for one. The
+// issue URL is the leading positional argument, so it is consumed before the
+// flag set, which stops at the first non-flag.
 func work(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "agent-runner: work: exactly one issue URL is required")
@@ -108,6 +110,7 @@ func work(ctx context.Context, args []string) int {
 	repo := fs.String("repo", "", "path to an existing checkout (unused in the dry run)")
 	gate := fs.String("gate", "", "the command that decides whether the work is done")
 	dryRun := fs.Bool("dry-run", false, "plan only; write nothing")
+	runDir := fs.String("run-dir", "", "base directory for the run record; no record is written unless it is set")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usage(os.Stdout)
@@ -125,7 +128,29 @@ func work(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	plan, err := report.Work(ctx, ref, *repo, *gate)
+	if *runDir == "" {
+		return planAndPrint(ctx, ref, *repo, *gate)
+	}
+	r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo})
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Printf("Run: %s\nDir: %s\n\n", r.ID, r.Dir)
+	code := planAndPrint(ctx, ref, *repo, *gate)
+	if err := r.Finish(code); err != nil {
+		// The run happened; the record of how it ended did not. Say so instead of
+		// exiting on the result as though the record could be trusted.
+		fmt.Fprintf(os.Stderr, "agent-runner: record run outcome: %v\n", err)
+		return 1
+	}
+	return code
+}
+
+// planAndPrint plans the work, prints the plan, and returns the exit code for it.
+// Splitting it out lets the recorded path finalize its record whatever the
+// plan decided, refusals included.
+func planAndPrint(ctx context.Context, ref, repo, gate string) int {
+	plan, err := report.Work(ctx, ref, repo, gate)
 	fmt.Print(plan.String())
 	if err != nil {
 		return fail(err)
@@ -144,8 +169,8 @@ func usage(w io.Writer) {
 
 Usage:
   agent-runner run <task>                                        run the offline mock agent
-  agent-runner work <issue-url> --repo <path> [--gate <cmd>] --dry-run
-                                                                 plan the work, write nothing
+  agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>] --dry-run
+                                                                 plan the work, writing nothing but the run record
   agent-runner --help                                            show this help
   agent-runner --version                                         print the version
 `)
