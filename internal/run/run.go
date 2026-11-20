@@ -1,5 +1,6 @@
 // Package run creates the durable record of a single run: the directory tree
-// every later stage writes into, and the run.json that describes it.
+// every later stage writes into, the run.json that describes it, and the
+// append-only event stream it appends to as it goes.
 package run
 
 import (
