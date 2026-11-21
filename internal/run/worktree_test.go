@@ -536,8 +536,17 @@ func TestRemoveWorktreeProvesRemovalBehindASymlink(t *testing.T) {
 	}
 	mustGit(t, parent, "worktree", "lock", wt)
 
-	if err := RemoveWorktree(r.Dir); err == nil {
+	// The list proof, not the on-disk one, is what this case is for: with the
+	// registration locked, git keeps it and the resolved comparison is the only
+	// thing that sees it. Asserting merely that an error came back lets a
+	// worktreeListed that never finds anything pass here, because the disk check
+	// fires on its own and reports the same tree.
+	err = RemoveWorktree(r.Dir)
+	if err == nil {
 		t.Fatal("RemoveWorktree = nil, want an error: the tree is still on disk and still registered")
+	}
+	if !strings.Contains(err.Error(), "still registered") {
+		t.Fatalf("RemoveWorktree = %v, want the registration named: the list proof did not fire behind the symlink", err)
 	}
 	if _, statErr := os.Lstat(wt); statErr != nil {
 		t.Fatalf("the test needs the tree to survive removal, but it is gone: %v", statErr)
