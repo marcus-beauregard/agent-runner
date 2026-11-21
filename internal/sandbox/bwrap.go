@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,6 +104,18 @@ func Args(runDir string, cfg Config) ([]string, error) {
 		"--bind", worktree, "/work",
 		"--bind", tmp, "/tmp",
 		"--bind", home, "/home/agent",
+	)
+	gitDir, err := gitMount(worktree)
+	if err != nil {
+		return nil, err
+	}
+	if gitDir != "" {
+		// The gitdir comes after the run's own mounts: a run directory under
+		// /tmp or /home would otherwise cover it again with the bind that
+		// carries it, and git would resolve a path the container lost.
+		args = append(args, "--ro-bind", gitDir, gitDir)
+	}
+	args = append(args,
 		"--proc", "/proc",
 		// --dev creates the minimal device set bubblewrap manages (null, zero,
 		// urandom and their companions); no host device is bound through.
@@ -140,6 +153,111 @@ func mount(root, configured, name string) (string, error) {
 	}
 	if !info.IsDir() {
 		return "", refuse("sandbox: %s mount %s is not a directory", name, dir)
+	}
+	return real, nil
+}
+
+// gitMount returns the common git directory a linked worktree's .git file
+// names, or the empty string when the worktree needs no extra mount.
+//
+// A run's checkout is a linked worktree, so <worktree>/.git is a file holding
+// "gitdir: <repo>/.git/worktrees/<name>" — an absolute host path that appears
+// in no mount. The container sees /work and nothing outside it, so every git
+// command answers "fatal: not a git repository" for the directory the file
+// names, and git is the registry's only substantive tool. Binding the common
+// directory read-only is enough: the allowlist has no writing subcommand, and
+// read-only objects and refs are the one thing a child must not change.
+//
+// The empty string also covers the worktree whose .git is a directory, because
+// that one is already inside the /work mount. Everything else that cannot be
+// resolved is a refusal: a container built around a dangling gitdir would
+// report a repository it does not have.
+//
+// The shape is checked rather than trusted, because the .git file is inside
+// the worktree a previous run wrote to. Only <common>/worktrees/<name>, with a
+// HEAD and an objects directory above it, is mounted — so a crafted file naming
+// /root/.ssh is refused instead of read into the cage.
+func gitMount(worktree string) (string, error) {
+	path := filepath.Join(worktree, ".git")
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("sandbox: stat worktree .git: %w", err)
+	case info.IsDir():
+		return "", nil
+	case !info.Mode().IsRegular():
+		return "", refuse("sandbox: worktree .git is neither a file nor a directory")
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: read worktree .git: %w", err)
+	}
+	target, ok := strings.CutPrefix(strings.TrimSpace(string(body)), "gitdir: ")
+	if !ok {
+		return "", refuse("sandbox: worktree .git does not name a gitdir: %q", strings.TrimSpace(string(body)))
+	}
+	dir := strings.TrimSpace(target)
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(worktree, dir)
+	}
+	gitDir, err := resolveDir(dir)
+	if err != nil {
+		return "", refuse("sandbox: worktree gitdir %s: %v", dir, err)
+	}
+
+	// A linked worktree usually keeps its own directory under the common one
+	// and records that in commondir; without the entry the gitdir is the common
+	// directory itself.
+	common := gitDir
+	if body, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+		rel := strings.TrimSpace(string(body))
+		if rel != "" {
+			if !filepath.IsAbs(rel) {
+				rel = filepath.Join(gitDir, rel)
+			}
+			if common, err = resolveDir(rel); err != nil {
+				return "", refuse("sandbox: worktree commondir %s: %v", rel, err)
+			}
+		}
+	}
+
+	rel, err := filepath.Rel(common, gitDir)
+	if err != nil {
+		return "", refuse("sandbox: worktree gitdir %s is outside %s", gitDir, common)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if common != gitDir && (len(parts) != 2 || parts[0] != "worktrees") {
+		return "", refuse("sandbox: worktree gitdir %s is not under %s/worktrees", gitDir, common)
+	}
+	if info, err := os.Stat(filepath.Join(common, "HEAD")); err != nil || info.IsDir() {
+		return "", refuse("sandbox: gitdir %s has no HEAD file", common)
+	}
+	if info, err := os.Stat(filepath.Join(common, "objects")); err != nil || !info.IsDir() {
+		return "", refuse("sandbox: gitdir %s has no objects directory", common)
+	}
+	return common, nil
+}
+
+// resolveDir proves a path names an existing directory, following symlinks so
+// the returned path is the one the container will bind and git will read.
+func resolveDir(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(real)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", path)
 	}
 	return real, nil
 }

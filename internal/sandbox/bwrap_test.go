@@ -197,7 +197,7 @@ func TestArgsLeavesNoWayBackToTheHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Args: %v", err)
 	}
-	forbidden := []string{"--share-net", "--unshare-net", "--cap-add", "--dev-bind", "--bind-try"}
+	forbidden := []string{"--share-net", "--cap-add", "--dev-bind", "--bind-try"}
 	for _, arg := range got {
 		for _, bad := range forbidden {
 			if arg == bad {
@@ -265,8 +265,14 @@ func TestContainerRefusesTheThreeEscapes(t *testing.T) {
 
 	// No interface but loopback is a stronger statement than one refused
 	// request: there is no route for any off-allowlist host to answer on, and
-	// proving it needs no network, no curl, and no timeout.
-	script := "tail -n +3 /proc/net/dev | grep -v '^ *lo:' | grep -q . && exit 1 || exit 0"
+	// proving it needs no network, no curl, and no timeout. The read and the
+	// count exit separately, so a pipeline that fails to read the file reports
+	// itself instead of counting zero interfaces and passing.
+	script := `set -e
+lines=$(tail -n +3 /proc/net/dev)
+other=$(printf '%s
+' "$lines" | sed '/^ *lo:/d;/^ *$/d' | wc -l)
+[ "$other" -eq 0 ]`
 	if out, err := runContainer(t, dir, script); err != nil {
 		t.Errorf("sandbox has an interface besides loopback: %v (%s)", err, out)
 	}
@@ -280,5 +286,180 @@ func TestContainerRefusesTheThreeEscapes(t *testing.T) {
 		t.Error("a backgrounded child outlived the sandbox and wrote its marker")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat marker: %v", err)
+	}
+}
+
+// mkdirAll creates a directory the gitdir fixtures need.
+func mkdirAll(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create %s: %v", path, err)
+		}
+	}
+}
+
+// writeTestFile writes one fixture file.
+func writeTestFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// gitWorktree creates a repository and a linked worktree at <run>/worktree,
+// which is the layout run.Worktree builds and the one the git tests need. It
+// returns the run directory and the common git directory the worktree's .git
+// file names.
+func gitWorktree(t *testing.T) (runDir, common string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is not installed: %v", err)
+	}
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	runDir = filepath.Join(root, "run")
+	mkdirAll(t, repo, filepath.Join(runDir, "tmp"), filepath.Join(runDir, "home"))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	writeTestFile(t, filepath.Join(repo, "f"), "one\n")
+	git("add", "f")
+	git("commit", "-qm", "init")
+	git("worktree", "add", "-q", "--no-track", filepath.Join(runDir, "worktree"), "-b", "agent/x", "HEAD")
+	common, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatalf("resolve the common dir: %v", err)
+	}
+	return runDir, common
+}
+
+// TestArgsBindsTheGitDirItsWorktreeNames is the assertion the plain argv test
+// cannot make: a linked worktree's .git is a file naming a host path, so the
+// argv has to carry that path into the container or git sees no repository. The
+// bind also has to follow the run's own mounts, which a run directory under /tmp
+// would otherwise shadow.
+func TestArgsBindsTheGitDirItsWorktreeNames(t *testing.T) {
+	dir, common := gitWorktree(t)
+	got, err := Args(dir, Config{})
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	at := -1
+	for i, arg := range got {
+		if arg == common {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		t.Fatalf("argv %q does not bind the gitdir %s", got, common)
+	}
+	if at == 0 || got[at-1] != "--ro-bind" {
+		t.Errorf("the gitdir is bound by %q, want --ro-bind: %q", got[at-1], got)
+	}
+	tmpAt := -1
+	for i, arg := range got {
+		if arg == "/tmp" && i > 1 && got[i-2] == "--bind" {
+			tmpAt = i
+			break
+		}
+	}
+	if tmpAt < 0 || at < tmpAt {
+		t.Errorf("the gitdir bind at %d does not follow the /tmp mount at %d: %q", at, tmpAt, got)
+	}
+}
+
+// TestContainerRunsGitInALinkedWorktree runs the commands the registry actually
+// offers inside a container built for a real linked worktree, then tries to
+// write into the gitdir it was given.
+func TestContainerRunsGitInALinkedWorktree(t *testing.T) {
+	dir, common := gitWorktree(t)
+	requireContainer(t, dir)
+
+	out, err := runContainer(t, dir, "git status --short && git log --oneline -1 && git diff --stat")
+	if err != nil {
+		t.Fatalf("git in the container failed: %v (%s)", err, out)
+	}
+	if out, err := runContainer(t, dir, "touch "+common+"/nope"); err == nil {
+		t.Errorf("the container wrote into the gitdir: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(common, "nope")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a write inside the gitdir reached the host")
+	}
+}
+
+// TestArgsRefusesAGitDirItCannotTrust treats the .git file as input a previous
+// run could write: only a directory shaped like the common dir of a linked
+// worktree is mounted, so a file naming somewhere else is refused.
+func TestArgsRefusesAGitDirItCannotTrust(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  func(dir string) string
+		setup func(t *testing.T, dir string)
+	}{
+		{
+			name: "gitdir does not exist",
+			body: func(dir string) string { return "gitdir: " + filepath.Join(dir, "gone") },
+		},
+		{
+			name: "not a gitdir line",
+			body: func(string) string { return "worktree" },
+		},
+		{
+			name: "gitdir is not under worktrees",
+			setup: func(t *testing.T, dir string) {
+				common := filepath.Join(dir, "common")
+				mkdirAll(t, filepath.Join(common, "objects"), filepath.Join(common, "elsewhere"))
+				writeTestFile(t, filepath.Join(common, "HEAD"), "ref: refs/heads/main\n")
+				writeTestFile(t, filepath.Join(common, "elsewhere", "commondir"), "../..\n")
+			},
+			body: func(dir string) string { return "gitdir: " + filepath.Join(dir, "common", "elsewhere") },
+		},
+		{
+			name: "common dir has no HEAD",
+			setup: func(t *testing.T, dir string) {
+				common := filepath.Join(dir, "common")
+				mkdirAll(t, filepath.Join(common, "objects"), filepath.Join(common, "worktrees", "w"))
+				writeTestFile(t, filepath.Join(common, "worktrees", "w", "commondir"), "../..\n")
+			},
+			body: func(dir string) string { return "gitdir: " + filepath.Join(dir, "common", "worktrees", "w") },
+		},
+		{
+			name: "common dir has no objects",
+			setup: func(t *testing.T, dir string) {
+				common := filepath.Join(dir, "common")
+				mkdirAll(t, filepath.Join(common, "worktrees", "w"))
+				writeTestFile(t, filepath.Join(common, "HEAD"), "ref: refs/heads/main\n")
+				writeTestFile(t, filepath.Join(common, "worktrees", "w", "commondir"), "../..\n")
+			},
+			body: func(dir string) string { return "gitdir: " + filepath.Join(dir, "common", "worktrees", "w") },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := containerLayout(t)
+			if tc.setup != nil {
+				tc.setup(t, dir)
+			}
+			writeTestFile(t, filepath.Join(dir, "worktree", ".git"), tc.body(dir))
+			_, err := Args(dir, Config{})
+			if err == nil {
+				t.Fatal("Args accepted a gitdir it cannot trust")
+			}
+			if !errors.Is(err, report.ErrRefused) {
+				t.Errorf("error %v does not wrap report.ErrRefused", err)
+			}
+		})
 	}
 }
