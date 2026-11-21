@@ -1,0 +1,28 @@
+{
+  "subject": "https://github.com/example/runlog/pull/101",
+  "issue": {
+    "number": 88,
+    "title": "Crash when the queue is empty",
+    "state": "open",
+    "assignees": [],
+    "labels": ["bug"]
+  },
+  "pr": {
+    "number": 101,
+    "head_sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "base_sha": "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+    "draft": false,
+    "mergeable": "no",
+    "mergeable_state": "blocked",
+    "state": "open"
+  },
+  "reviews": [],
+  "checks": [
+    {"id": 4401, "name": "build", "conclusion": "success", "status": "completed"}
+  ],
+  "comments": [
+    {"id": 31001, "author": "marcus-beauregard", "created_at": "2026-11-18T09:12:00Z"},
+    {"id": 31002, "author": "reviewer-jane", "created_at": "2026-11-18T10:40:00Z"},
+    {"id": 31003, "author": "marcus-beauregard", "created_at": "2026-11-18T10:55:00Z"}
+  ]
+}
