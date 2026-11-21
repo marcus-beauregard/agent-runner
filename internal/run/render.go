@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/marcus-beauregard/agent-runner/internal/sandbox"
 )
 
 // The event kinds the report reads. They are named next to their payloads
@@ -237,6 +239,7 @@ func writeHeader(b *strings.Builder, rec *record) {
 		{"Branch", rec.Branch},
 		{"Base", rec.BaseSHA},
 		{"Budget", rec.Budget},
+		{"Sandbox", sandboxLine(rec.Sandbox)},
 		{"Started", started(rec.CreatedAt)},
 		{"State", rec.State},
 	}
@@ -251,6 +254,25 @@ func writeHeader(b *strings.Builder, rec *record) {
 		b.WriteString("- Exit code: none yet\n")
 	}
 	b.WriteString("\n")
+}
+
+// sandboxLine is what the header says about isolation: the mode the run got,
+// and, for the weaker one, the sentence naming what it left unenforced. An empty
+// field prints "(not recorded)" instead of no line at all — a reader who does
+// not see a sandbox line assumes the strong mode, and a record written before
+// the field existed has to stay distinguishable from a run that chose worktree.
+func sandboxLine(mode string) string {
+	switch mode {
+	case "":
+		return "(not recorded)"
+	case string(sandbox.Worktree):
+		// The same sentence the warning prints, from the same place: two copies
+		// of what worktree leaves open would drift, and the one that drifted
+		// would be the one saying less.
+		return fmt.Sprintf("%s (%s are unenforced)", mode, sandbox.Unenforced())
+	default:
+		return mode
+	}
 }
 
 // writeRefusal prints why the run stopped, before what it did: a reader who

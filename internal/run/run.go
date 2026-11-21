@@ -55,6 +55,10 @@ type Meta struct {
 	Branch  string
 	BaseSHA string
 	Budget  string // e.g. "--budget 45m"
+	// Sandbox is the isolation the run was granted: "container" or "worktree".
+	// It is what the run was, not what it asked for, and is empty only when the
+	// run never got a mode — a refusal decided before any stage ran.
+	Sandbox string
 	// Account is the authenticated account the run acted as. Replay recomputes
 	// the plan with the same classifier the command used, and that classifier
 	// cannot tell the run's own reply from a question without it (PRD §8).
@@ -83,6 +87,11 @@ type record struct {
 	// cleanup finds an orphan the event alone would have hidden.
 	Worktree string `json:"worktree,omitempty"`
 	Budget   string `json:"budget"`
+	// Sandbox is the isolation the run got, omitted when it never got one. An
+	// absent field stays distinguishable from worktree: a record written before
+	// this field existed must not read as a run that chose the weaker mode, and
+	// a refused run that never reached a mode has nothing to name here.
+	Sandbox string `json:"sandbox,omitempty"`
 	// Account is omitted when empty, which is what a run recorded before this
 	// field existed looks like. Replay refuses that rather than guessing it.
 	Account  string `json:"account,omitempty"`
@@ -152,6 +161,7 @@ func New(base string, meta Meta) (*Run, error) {
 		Branch:    meta.Branch,
 		BaseSHA:   meta.BaseSHA,
 		Budget:    meta.Budget,
+		Sandbox:   meta.Sandbox,
 		Account:   meta.Account,
 		State:     stateRunning,
 	}
