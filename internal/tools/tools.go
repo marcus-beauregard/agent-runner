@@ -53,7 +53,8 @@ type Ledger interface {
 // is -1 then, because a killed process has no exit status of its own. Refused
 // names why the tool call failed after the process ran — "output-limit",
 // "wait-delay", or "kill-failed" — so a record never reads as success for a
-// call that failed.
+// call that failed. "kill-failed" wins when more than one applies: the others
+// say why the call ended, it says the group may still be running.
 // Orphans says the command exited on its own and its group still held a member,
 // which the kill after Wait then reached — the case Killed cannot describe,
 // because the command itself was not stopped.
@@ -537,9 +538,12 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	if killErr != nil {
 		// The group may still be running. A record that said "nothing left
 		// behind" would invert on exactly the path where the evidence matters,
-		// so the failed kill is named and the call fails.
+		// so the failed kill is named and the call fails. It is named on every
+		// path, timeout and cancel included: Killed says the group was
+		// signalled on purpose, so a kill that failed cannot be left implied
+		// to have worked just because the command had already stopped.
+		refused = "kill-failed"
 		if outErr == nil {
-			refused = "kill-failed"
 			outErr = fmt.Errorf("kill process group: %w", killErr)
 		} else {
 			outErr = fmt.Errorf("%w (kill process group: %v)", outErr, killErr)

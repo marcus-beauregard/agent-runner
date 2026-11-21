@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -199,5 +200,42 @@ func TestCancelKillsTheProcessGroup(t *testing.T) {
 	}
 	if exit.Killed != "canceled" || exit.ExitCode != -1 {
 		t.Fatalf("recorded killed %q, code %d; want canceled and -1", exit.Killed, exit.ExitCode)
+	}
+}
+
+// A command the deadline stopped whose group kill then fails must record the
+// failed kill too. Killed already says the group was signalled on purpose, so
+// an empty Refused would let the record read as a containment that did not
+// happen — on the one path where the child may still be alive.
+func TestFailedGroupKillOnTimeoutIsRecorded(t *testing.T) {
+	allowShell(t)
+	r := newRegistry(t)
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	r.SetTimeout(toolRunCommand, 250*time.Millisecond)
+	old := killGroup
+	killGroup = func(*exec.Cmd) (bool, error) { return false, errors.New("operation not permitted") }
+	t.Cleanup(func() { killGroup = old })
+	_, err := run(t, r, `sh -c "sleep 300"`)
+	wantErr(t, err, "command timed out")
+	wantErr(t, err, "kill process group")
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	exit, ok := led.events[0].data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", led.events[0].data)
+	}
+	if exit.Killed != "timeout" {
+		t.Fatalf("recorded killed %q, want %q", exit.Killed, "timeout")
+	}
+	if exit.Refused != "kill-failed" {
+		t.Fatalf("recorded refused %q, want %q", exit.Refused, "kill-failed")
+	}
+	if exit.ExitCode != -1 {
+		t.Fatalf("recorded exit code %d, want -1 for a stopped command", exit.ExitCode)
+	}
+	if exit.Orphans {
+		t.Fatal("record claims orphans for a command the run killed")
 	}
 }
