@@ -96,7 +96,13 @@ func TestCommandLeavesNoBackgroundChild(t *testing.T) {
 	r := newRegistry(t)
 	led := &fakeLedger{}
 	r.SetLedger(led)
-	_, _ = run(t, r, `sh -c "sleep 300 & echo $! > child.pid"`)
+	// The child's output is redirected so it cannot hold the capture pipe:
+	// this is the clean exit 0 the field exists for, not the wait-delay
+	// refusal that a child sharing stdout would produce.
+	_, err := run(t, r, `sh -c "sleep 300 >/dev/null 2>&1 & echo $! > child.pid"`)
+	if err != nil {
+		t.Fatalf("command returned %v, want a clean exit", err)
+	}
 	pid := readPID(t, r.root, "child.pid")
 	waitGone(t, pid)
 	if len(led.events) != 1 {
@@ -108,6 +114,9 @@ func TestCommandLeavesNoBackgroundChild(t *testing.T) {
 	}
 	if exit.ExitCode != 0 || exit.Killed != "" {
 		t.Fatalf("recorded code %d, killed %q; want 0 and no kill", exit.ExitCode, exit.Killed)
+	}
+	if exit.Refused != "" {
+		t.Fatalf("recorded refused %q, want a clean outcome", exit.Refused)
 	}
 	if !exit.Orphans {
 		t.Fatal("record does not name the backgrounded child the group kill reached")

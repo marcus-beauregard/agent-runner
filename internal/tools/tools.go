@@ -51,8 +51,9 @@ type Ledger interface {
 // that was executed (never the environment), and how it ended. Killed names
 // why the group was killed — "timeout", "canceled", or a signal — and ExitCode
 // is -1 then, because a killed process has no exit status of its own. Refused
-// names why the tool rejected a result the process produced — "output-limit" or
-// "wait-delay" — so a record never reads as success for a call that failed.
+// names why the tool call failed after the process ran — "output-limit",
+// "wait-delay", or "kill-failed" — so a record never reads as success for a
+// call that failed.
 // Orphans says the command exited on its own and its group still held a member,
 // which the kill after Wait then reached — the case Killed cannot describe,
 // because the command itself was not stopped.
@@ -460,6 +461,10 @@ func (r *Registry) writeFile(ctx context.Context, args map[string]any) (string, 
 	return "wrote " + name, nil
 }
 
+// killGroup is killProcessGroup behind a variable so a test can make the kill
+// fail without needing a real EPERM.
+var killGroup = killProcessGroup
+
 func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string, error) {
 	command, err := strArg(args, "command")
 	if err != nil {
@@ -498,7 +503,7 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	duration := time.Since(start)
 	// The command is over. Anything still in its group was left behind by it:
 	// a backgrounded child, or the whole group when the deadline fired.
-	orphans, _ := killProcessGroup(cmd)
+	orphans, killErr := killGroup(cmd)
 	code, killed := exitStatus(cmd.ProcessState)
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
@@ -528,6 +533,17 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 		refused, outErr = "wait-delay", errors.New("command left a child holding its output; the process group was killed")
 	case runErr != nil:
 		outErr = fmt.Errorf("command failed: %w", runErr)
+	}
+	if killErr != nil {
+		// The group may still be running. A record that said "nothing left
+		// behind" would invert on exactly the path where the evidence matters,
+		// so the failed kill is named and the call fails.
+		if outErr == nil {
+			refused = "kill-failed"
+			outErr = fmt.Errorf("kill process group: %w", killErr)
+		} else {
+			outErr = fmt.Errorf("%w (kill process group: %v)", outErr, killErr)
+		}
 	}
 	entry := commandExit{
 		Name:       argv[0],
