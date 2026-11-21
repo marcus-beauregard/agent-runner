@@ -15,10 +15,15 @@ import (
 func newTestRun(t *testing.T) (*Run, string) {
 	t.Helper()
 	base := t.TempDir()
+	// A record that names a repo and a branch is a record whose tree can be
+	// looked for, so the fixture's parent is a real repository rather than a
+	// path that cannot be read.
+	repo := t.TempDir()
+	mustGit(t, repo, "init", "-q", ".")
 	r, err := New(base, Meta{
 		Kind:    "build",
 		Subject: "https://example.test/issues/33",
-		Repo:    "/tmp/repo",
+		Repo:    repo,
 		Branch:  "agent/report",
 		BaseSHA: "abc1234",
 	})

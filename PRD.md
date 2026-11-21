@@ -179,10 +179,12 @@ Two tiers, because they cost different things to lose.
 
 | Tier | What goes | Default age | Why |
 |---|---|---|---|
-| **Worktree** | `worktree/` and its git registration | merged/closed, or 14 days | Large (hundreds of MB), fully regenerable from the branch |
+| **Worktree** | `worktree/` and its git registration | exit 0, as the run's last step; otherwise merged/closed or 14 days | Large (hundreds of MB), regenerable from the branch once the work is on it |
 | **Run record** | the whole run directory | 90 days, or the newest 50 runs | Small, and it is the history |
 
 Losing a worktree costs a re-clone. Losing a run record costs the reason a decision was made, so the two are never deleted under the same policy and the record always outlives the checkout.
+
+A run whose work is settled gives its tree back itself. Exit 0 is the only code whose change reached the branch, so the checkout is scratch from that moment, and the run removes it as its last recorded step — `worktree:remove` in the stream, next to the `worktree:add` that made it. Every other ending keeps its tree for `gc`, by age: the gate runs before the commit stage, so a run that failed (1), was refused by the gate (2) or policy (3), or stopped for a person (4) may be holding the only copy of the attempt and of why it was stopped, and a resume needs the tree it was editing. A run with no terminal state is resumable and is never a cleanup candidate.
 
 Rules it will not break:
 
@@ -319,7 +321,7 @@ A refusal is a successful run. Stopping costs a maintainer nothing; a confident 
 - Owning a clock. Scheduling is the caller's problem by design.
 - Watchers, daemons, pollers, queues, leases or work-in-progress limits. Those are the meta framework's job: it decides which thread gets a command and when. A `watch` command inside this binary would be the first step of turning a tool into a service, and the moment that happens the pipelines stop being testable in isolation.
 - Deciding which of the three commands to run. Routing on "what changed" looks helpful and duplicates a decision the caller has to make anyway.
-- Deleting anything on its own initiative. `gc` is a command with a dry run, and it is the only thing here that removes files.
+- Deleting anything on its own initiative, beyond the one exception in §6.3: a run that finished done removes the worktree it wrote in, as its last recorded step. Everything else that removes files is `gc`, a command with a dry run.
 
 ## 14.1 Where the meta framework goes
 

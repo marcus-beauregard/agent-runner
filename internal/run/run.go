@@ -41,8 +41,9 @@ const (
 	stateFailed     = "failed"      // gate failed (2) or anything unexpected (1)
 )
 
-// Meta is what the caller knows about a run before it starts. Every field is
-// recorded verbatim; none of it is interpreted here.
+// Meta is what the caller knows about a run before it starts, recorded as
+// given. Worktree later replaces Repo, Branch and BaseSHA with the values it
+// resolved — the parent it actually ran git in, and the branch it created.
 type Meta struct {
 	Kind    string // "build", "resolve" or "amend"
 	Subject string // the issue or pull request URL
@@ -72,7 +73,12 @@ type record struct {
 	Repo      string `json:"repo"`
 	Branch    string `json:"branch"`
 	BaseSHA   string `json:"base_sha"`
-	Budget    string `json:"budget"`
+	// Worktree is the checkout this run was given, omitted when it never had
+	// one. The record carries it because the record is written before the
+	// stream: a run killed between the two still names its tree here, so
+	// cleanup finds an orphan the event alone would have hidden.
+	Worktree string `json:"worktree,omitempty"`
+	Budget   string `json:"budget"`
 	// Account is omitted when empty, which is what a run recorded before this
 	// field existed looks like. Replay refuses that rather than guessing it.
 	Account  string `json:"account,omitempty"`
@@ -102,6 +108,13 @@ func New(base string, meta Meta) (*Run, error) {
 		return nil, err
 	}
 	dir := filepath.Join(root, id)
+	// The directory is a location, and every path derived from it is resolved
+	// by a different process with a different working directory: git runs in
+	// the parent, the guard in the caller's. An absolute path is the only
+	// spelling they all agree on, so the run owns one from the start.
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("run %s already exists: %w", id, err)
@@ -138,7 +151,13 @@ func New(base string, meta Meta) (*Run, error) {
 // process that has already exited, which is state that lies.
 //
 // A run killed before Finish keeps the running state it was created with: that
-// is correct, because it was never finished and remains resumable.
+// is correct, because it was never finished and remains resumable, and its
+// worktree is left exactly as the resume needs it.
+//
+// Finish then removes the run's worktree when one was recorded and the work in
+// it is settled (settledWork). A cleanup that fails rewrites the record as
+// failed: the record must not say done over a parent that still names a tree
+// nobody owns.
 func (r *Run) Finish(code int) error {
 	rec, err := loadRecord(r.Dir)
 	if err != nil {
@@ -146,7 +165,47 @@ func (r *Run) Finish(code int) error {
 	}
 	rec.State = terminalState(code)
 	rec.ExitCode = &code
-	return writeRecord(r.Dir, *rec)
+	if err := writeRecord(r.Dir, *rec); err != nil {
+		return err
+	}
+	// Cleanup is a step, not a background hope (PRD §6.3), but only the codes
+	// whose work is settled take the tree with them. A run with no terminal
+	// state never reaches Finish, so a resume still finds its work in progress;
+	// a run that stopped with edits in hand keeps them for the person or the gc.
+	if settledWork(code) {
+		if err := CleanupWorktree(r.Dir, code); err != nil {
+			// The run is not the state it just claimed: a parent still naming a
+			// tree nobody owns is a failure whatever the work itself achieved.
+			// Record that so run.json and the exit code agree, then say why.
+			failed := 1
+			rec.State, rec.ExitCode = stateFailed, &failed
+			if werr := writeRecord(r.Dir, *rec); werr != nil {
+				return fmt.Errorf("cleanup worktree: %w (recording the failure also failed: %v)", err, werr)
+			}
+			return fmt.Errorf("cleanup worktree: %w", err)
+		}
+	}
+	return nil
+}
+
+// settledWork reports whether a terminal exit code leaves a checkout that is
+// only scratch. 0 finished with its work on the branch, so the checkout is
+// regenerable from it and cleanup can delete it.
+//
+// 1, 2, 3 and 4 are not settled. The gate runs before the commit stage, so the
+// work a run had refused (2) never reached the branch: that tree holds the only
+// copy of the attempted change and of why it was refused, exactly as it does
+// for needs_human (4), which exists to hand a tree with uncommitted work to a
+// person. A failure (1) or a refusal (3) can stop holding the same edits. A
+// --force removal there deletes the only copy. Those trees are collected by
+// age in gc; PRD §6.3 gives only a settled run the right to remove its own.
+func settledWork(code int) bool {
+	switch code {
+	case 0:
+		return true
+	default:
+		return false
+	}
 }
 
 // terminalState names the outcome an exit code stands for. Budget exhaustion is

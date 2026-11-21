@@ -214,6 +214,18 @@ func (s Start) Remember(code int) error {
 	if s.Run == nil || code != 0 {
 		return nil
 	}
+	// The caller's code is not the whole answer: Finish can fail a run after it
+	// held 0, when the checkout it could not discard is the only copy of a
+	// change. Remembering that digest would let the next run exit 0 unchanged
+	// over a change nobody answered. The record decides; a record that cannot be
+	// read is not proof the work is done, so it records nothing either.
+	rec, err := loadRecord(s.Run.Dir)
+	if err != nil {
+		return nil
+	}
+	if rec.State != stateRunning && rec.State != stateDone {
+		return nil
+	}
 	return SaveState(s.Base, s.Kind, s.Subject, State{Digest: s.Digest, UpdatedAt: time.Now().UTC()})
 }
 
