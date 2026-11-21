@@ -292,9 +292,9 @@ func TestWorktreeRecordsAdd(t *testing.T) {
 }
 
 // TestFinishRemovesRecordedWorktree is the ticket's done-when for a finished
-// run: no registration behind and both steps in the stream. The tree is dirty
-// on purpose — cleanup is what discards it, and a single --force would refuse a
-// tree with uncommitted work. It is scratch because the work is on the branch.
+// run: no registration behind and both steps in the stream. The tree's work is
+// committed first, which is what makes the checkout scratch — everything in it
+// is on the branch, so removing it costs nothing that cannot be rebuilt.
 func TestFinishRemovesRecordedWorktree(t *testing.T) {
 	parent := worktreeParent(t)
 	r := newWorktreeRun(t, parent, cageSubject)
@@ -303,7 +303,9 @@ func TestFinishRemovesRecordedWorktree(t *testing.T) {
 		t.Fatalf("Worktree: %v", err)
 	}
 	wt := filepath.Join(r.Dir, "worktree")
-	writeTestFile(t, filepath.Join(wt, "half-done.txt"), "wip\n")
+	writeTestFile(t, filepath.Join(wt, "change.txt"), "work\n")
+	mustGit(t, wt, "add", ".")
+	mustGit(t, wt, "commit", "-q", "-m", "the run's change")
 
 	if err := r.Finish(0); err != nil {
 		t.Fatalf("Finish(0): %v", err)
@@ -316,6 +318,9 @@ func TestFinishRemovesRecordedWorktree(t *testing.T) {
 	}
 	if _, err := mustGitErr(parent, "rev-parse", "--verify", "refs/heads/"+branch); err != nil {
 		t.Errorf("cleanup deleted the branch: %v", err)
+	}
+	if got := mustGit(t, parent, "show", branch+":change.txt"); got != "work" {
+		t.Errorf("branch holds %q, want the committed change: the tree was discarded without it", got)
 	}
 
 	events := readEvents(t, r.Dir)
@@ -345,6 +350,52 @@ func TestFinishRemovesRecordedWorktree(t *testing.T) {
 	}
 	if rec.State != stateDone || rec.ExitCode == nil || *rec.ExitCode != 0 {
 		t.Errorf("record state/exit = %q/%v, want done/0", rec.State, rec.ExitCode)
+	}
+}
+
+// TestFinishKeepsAWorktreeWithUncommittedWork is the guard behind "settled".
+// Exit 0 claims the work reached the branch, but a checkout still holding edits
+// is the only copy of them: deleting it with --force would lose the change and
+// record the run as done. The tree stays, the run is failed, and the reason is
+// in the stream.
+func TestFinishKeepsAWorktreeWithUncommittedWork(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	writeTestFile(t, filepath.Join(wt, "not-committed.txt"), "wip\n")
+
+	if err := r.Finish(0); err == nil {
+		t.Fatal("Finish(0) = nil, want the uncommitted change to stop the cleanup")
+	}
+	if _, err := os.Stat(filepath.Join(wt, "not-committed.txt")); err != nil {
+		t.Errorf("cleanup discarded uncommitted work: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); !strings.Contains(list, wt) {
+		t.Errorf("parent stopped registering %s, which still holds the only copy:\\n%s", wt, list)
+	}
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	if rec.State != stateFailed || rec.ExitCode == nil || *rec.ExitCode != 1 {
+		t.Errorf("record state/exit = %q/%v, want %q/1", rec.State, rec.ExitCode, stateFailed)
+	}
+	var payload worktreeRemove
+	removed := false
+	for _, e := range readEvents(t, r.Dir) {
+		if e.Kind != kindWorktreeRemove {
+			continue
+		}
+		removed = true
+		if err := json.Unmarshal(e.Data, &payload); err != nil {
+			t.Fatalf("decode %s: %v", kindWorktreeRemove, err)
+		}
+	}
+	if !removed || !strings.Contains(payload.Error, "uncommitted") {
+		t.Errorf("remove event = %+v, want it to say the worktree is uncommitted", payload)
 	}
 }
 

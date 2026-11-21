@@ -159,28 +159,33 @@ func Worktree(runDir, repo, slug string) (branch, baseSHA string, err error) {
 	}
 
 	branch = "agent/" + slug
+	oldBranch, oldBase, oldWT, oldRepo := rec.Branch, rec.BaseSHA, rec.Worktree, rec.Repo
+	ref := WorktreeRef{Path: wt, Branch: branch, BaseSHA: base}
+	// The record names the tree before git creates it, and names the parent too:
+	// a kill between the two leaves a registration the record can find instead
+	// of a directory nobody owns, and RemoveWorktree has the repo it needs.
+	rec.Branch, rec.BaseSHA, rec.Worktree, rec.Repo = branch, base, wt, repo
+	if err := writeRecord(runDir, *rec); err != nil {
+		return "", "", fmt.Errorf("record worktree: %w", err)
+	}
 	// --no-track keeps the branch's upstream unset, and the resolved sha is the
 	// start point so the recorded BaseSHA is the commit the branch holds even
 	// if origin moves between the two git calls.
 	if _, err := gitRun(repo, "worktree", "add", "--no-track", wt, "-b", branch, base); err != nil {
+		rec.Branch, rec.BaseSHA, rec.Worktree, rec.Repo = oldBranch, oldBase, oldWT, oldRepo
+		if werr := writeRecord(runDir, *rec); werr != nil {
+			return "", "", fmt.Errorf("add worktree: %w (restoring the record also failed: %v)", err, werr)
+		}
 		return "", "", fmt.Errorf("add worktree: %w", err)
 	}
-	oldBranch, oldBase, oldWT := rec.Branch, rec.BaseSHA, rec.Worktree
-	ref := WorktreeRef{Path: wt, Branch: branch, BaseSHA: base}
-	rec.Branch, rec.BaseSHA, rec.Worktree = branch, base, wt
-	if err := writeRecord(runDir, *rec); err != nil {
-		rollbackWorktree(repo, wt, branch)
-		return "", "", fmt.Errorf("record worktree: %w", err)
-	}
-	// The event goes in after the record so the two agree on the tree's
-	// identity. A stream that cannot take it is the same failure as a record
-	// that cannot: the tree comes out and the record goes back to naming none.
 	if err := appendWorktreeEvent(runDir, kindWorktreeAdd, ref); err != nil {
-		rollbackWorktree(repo, wt, branch)
-		rec.Branch, rec.BaseSHA, rec.Worktree = oldBranch, oldBase, oldWT
+		// The record goes back first. If that fails the record still names a
+		// tree that is on disk, which is the safe direction to be wrong in.
+		rec.Branch, rec.BaseSHA, rec.Worktree, rec.Repo = oldBranch, oldBase, oldWT, oldRepo
 		if werr := writeRecord(runDir, *rec); werr != nil {
 			return "", "", fmt.Errorf("record worktree: %w (restoring the record also failed: %v)", err, werr)
 		}
+		rollbackWorktree(repo, wt, branch)
 		return "", "", fmt.Errorf("record worktree: %w", err)
 	}
 	return branch, base, nil
@@ -330,6 +335,20 @@ func CleanupWorktree(runDir string, code int) error {
 	}
 	wt := rec.Worktree
 	data := worktreeRemove{Path: wt, ExitCode: code}
+	// Settled is a claim about the tree, not about the exit code. The checkout
+	// is scratch only when everything in it is on the branch; a change that was
+	// never committed exists nowhere else, and --force would discard it.
+	clean, err := worktreeClean(wt)
+	if err == nil && !clean {
+		err = errors.New("worktree has uncommitted changes")
+	}
+	if err != nil {
+		data.Error = err.Error()
+		if aerr := appendWorktreeEvent(runDir, kindWorktreeRemove, data); aerr != nil {
+			return fmt.Errorf("remove worktree: %w (recording it also failed: %v)", err, aerr)
+		}
+		return fmt.Errorf("remove worktree: %w", err)
+	}
 	if err := RemoveWorktree(runDir); err != nil {
 		data.Error = err.Error()
 		if aerr := appendWorktreeEvent(runDir, kindWorktreeRemove, data); aerr != nil {
@@ -341,6 +360,22 @@ func CleanupWorktree(runDir string, code int) error {
 		return fmt.Errorf("record worktree removal: %w", err)
 	}
 	return nil
+}
+
+// worktreeClean reports whether a checkout holds nothing that is not on its
+// branch. A tree that is already gone has nothing left to lose, which is the
+// same answer for this caller: the removal only has a registration to prune.
+func worktreeClean(wt string) (bool, error) {
+	if _, err := os.Lstat(wt); errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+	out, err := gitRun(wt, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("read worktree status: %w", err)
+	}
+	return out == "", nil
 }
 
 // appendWorktreeEvent adds one worktree event to the run's stream. It opens the
