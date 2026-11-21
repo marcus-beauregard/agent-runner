@@ -46,6 +46,8 @@ func run(args []string) int {
 		return runAgent(ctx, args[1:])
 	case "work":
 		return work(ctx, args[1:])
+	case "report":
+		return reportRun(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "agent-runner: unknown command: %s\n", args[0])
 		return 1
@@ -158,6 +160,51 @@ func planAndPrint(ctx context.Context, ref, repo, gate string) int {
 	return 0
 }
 
+// reportRun prints one recorded run as REPORT.md. It reads the record and
+// writes nothing, so it is safe to point at a run that is still going, at a
+// finished one, and at one a resumed process is holding open. It is a view of
+// the two files as they were read, not a snapshot of one instant: a stage that
+// finishes between the reads can sit under a header that still says running, so
+// render again rather than trust one mid-run render.
+func reportRun(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "agent-runner: report: exactly one run id is required")
+		return 1
+	}
+	if args[0] == "-h" || args[0] == "--help" {
+		usage(os.Stdout)
+		return 0
+	}
+	id := args[0]
+	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	runDir := fs.String("run-dir", "", "base directory the run record lives under")
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage(os.Stdout)
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "agent-runner: report: %v\n", err)
+		return 1
+	}
+	if len(fs.Args()) != 0 {
+		fmt.Fprintln(os.Stderr, "agent-runner: report: exactly one run id is required")
+		return 1
+	}
+	dir, err := runrec.Locate(*runDir, id)
+	if err != nil {
+		return fail(err)
+	}
+	b, err := runrec.RenderReport(dir)
+	if err != nil {
+		return fail(err)
+	}
+	if _, err := os.Stdout.Write(b); err != nil {
+		return fail(err)
+	}
+	return 0
+}
+
 // fail prints one line to stderr and returns the exit code for err.
 func fail(err error) int {
 	fmt.Fprintf(os.Stderr, "agent-runner: %v\n", err)
@@ -171,6 +218,7 @@ Usage:
   agent-runner run <task>                                        run the offline mock agent
   agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>] --dry-run
                                                                  plan the work, writing nothing but the run record
+  agent-runner report <id> [--run-dir <dir>]                     print REPORT.md for a recorded run
   agent-runner --help                                            show this help
   agent-runner --version                                         print the version
 `)
