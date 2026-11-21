@@ -145,11 +145,8 @@ func runAgent(ctx context.Context, args []string) int {
 	// A refusal is a finished run, so it gets a record with its own state rather
 	// than a directory that says running for a process that already exited.
 	if modeErr != nil {
-		if rec != nil {
-			if rerr := rec.Refuse(refusalForMode(modeErr)); rerr != nil {
-				fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
-				return 1
-			}
+		if !refusalRecorded(rec, refusalForMode(modeErr)) {
+			return 1
 		}
 		if code := finishRun(rec, report.ExitCode(modeErr)); code != 0 {
 			return code
@@ -182,11 +179,8 @@ func runAgent(ctx context.Context, args []string) int {
 			}
 		}
 		if err := registry.SetIsolation(tools.Isolation{Mode: mode, RunDir: layout}); err != nil {
-			if rec != nil {
-				if rerr := recordRefusal(rec, err); rerr != nil {
-					fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
-					return 1
-				}
+			if !refusalRecorded(rec, refusalOf(err)) {
+				return 1
 			}
 			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
 				return code
@@ -202,11 +196,8 @@ func runAgent(ctx context.Context, args []string) int {
 	}
 	result, err := runAudited(ctx, wd, task, model, registry)
 	if err != nil {
-		if rec != nil {
-			if rerr := recordRefusal(rec, err); rerr != nil {
-				fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
-				return 1
-			}
+		if !refusalRecorded(rec, refusalOf(err)) {
+			return 1
 		}
 		if code := finishRun(rec, report.ExitCode(err)); code != 0 {
 			return code
@@ -569,8 +560,7 @@ func work(ctx context.Context, args []string) int {
 	// A refusal is a finished run, so it gets a record with its own state rather
 	// than a directory that says running for a process that already exited.
 	if modeErr != nil {
-		if err := r.Refuse(refusalForMode(modeErr)); err != nil {
-			fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+		if !refusalRecorded(r, refusalForMode(modeErr)) {
 			return 1
 		}
 		if err := r.Finish(report.ExitCode(modeErr)); err != nil {
@@ -580,8 +570,7 @@ func work(ctx context.Context, args []string) int {
 		return fail(modeErr)
 	}
 	code, planErr := planAndPrint(ctx, ref, *repo, *gate)
-	if err := recordRefusal(r, planErr); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+	if !refusalRecorded(r, refusalOf(planErr)) {
 		return 1
 	}
 	if planErr != nil {
@@ -609,15 +598,34 @@ func planAndPrint(ctx context.Context, ref, repo, gate string) (int, error) {
 	return 0, nil
 }
 
-// recordRefusal writes the typed refusal behind err into the run record. Only a
-// *refuse.Refusal is recorded: an arbitrary error is not a refusal, and writing
-// one as if it were would put a code on something no vocabulary covers.
-func recordRefusal(r *runrec.Run, err error) error {
+// refusalOf returns the refusal carried by err, or nil when err is not one: a
+// stage that failed for its own reasons has nothing to record here. Only a
+// *refuse.Refusal is recorded — writing an arbitrary error as if it were a
+// refusal would put a code on something no vocabulary covers.
+func refusalOf(err error) *refuse.Refusal {
 	var ref *refuse.Refusal
-	if !errors.As(err, &ref) {
-		return nil
+	if errors.As(err, &ref) {
+		return ref
 	}
-	return r.Refuse(ref)
+	return nil
+}
+
+// refusalRecorded records the refusal and reports whether the run may go on to
+// Finish. A refusal the record holds is enough: a lost event is said out loud
+// and the run is still refused, because a record left at running for a process
+// that has already exited is the state Finish exists to prevent. An error that
+// means the record does not hold the refusal leaves nothing for Finish to
+// carry, so the caller stops instead of writing an outcome with no reason.
+func refusalRecorded(r *runrec.Run, ref *refuse.Refusal) bool {
+	if r == nil || ref == nil {
+		return true
+	}
+	err := r.Refuse(ref)
+	if err == nil {
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+	return errors.Is(err, runrec.ErrEventLost)
 }
 
 // refusalForMode types the sandbox refusal, which is decided before any stage

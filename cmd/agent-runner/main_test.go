@@ -980,6 +980,37 @@ func TestRunDoubleDashKeepsADashTask(t *testing.T) {
 	}
 }
 
+// TestRefusalRecordedKeepsARefusedRunGoing pins the caller's rule, which is the
+// half of #59 a test of the record alone cannot see: a refusal the record holds
+// goes on to Finish even when its event was lost, and a refusal the record
+// cannot hold stops the caller instead of writing an outcome with no reason.
+func TestRefusalRecordedKeepsARefusedRunGoing(t *testing.T) {
+	r, err := runrec.New(filepath.Join(t.TempDir(), "run"), runrec.Meta{Kind: "run", Subject: "t"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	led, err := runrec.OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	// A closed stream stands in for a write that fails: the refusal is in
+	// run.json by then, and only its event has nowhere to land.
+	if err := led.Close(); err != nil {
+		t.Fatalf("close ledger: %v", err)
+	}
+	r.SetLedger(led)
+
+	if !refusalRecorded(r, refuse.New(refuse.SandboxUnavailable, "sandbox", "no namespace on this host")) {
+		t.Fatal("a lost event must not stop the run before Finish")
+	}
+	if refusalRecorded(r, refuse.New(refuse.Code("not-in-the-vocabulary"), "sandbox", "x")) {
+		t.Fatal("a refusal the record cannot hold must stop the caller")
+	}
+	if !refusalRecorded(nil, nil) {
+		t.Fatal("an unrecorded run has nothing to stop for")
+	}
+}
+
 // TestRunRecordsARefusedNamespace is the record side of the hole Detect cannot
 // see: bwrap answers its own probe and then refuses this run's mounts. The run
 // is refused at exit 3 with a code in run.json, not recorded as a container run

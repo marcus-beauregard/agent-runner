@@ -306,6 +306,55 @@ func TestFinishRefusesUnusableRecord(t *testing.T) {
 	}
 }
 
+// TestRefuseReportsALostEvent is the other half of the same claim: the record
+// is written before the event, so a stream that cannot take the line still
+// leaves a refusal a person can read, and Finish — the caller's next step —
+// still gives the run a terminal state instead of leaving it saying running for
+// a process that has exited.
+func TestRefuseReportsALostEvent(t *testing.T) {
+	r, err := New(t.TempDir(), Meta{Kind: "build", Subject: "https://example.test/issues/59"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	led, err := OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	// A closed stream stands in for a write that fails: the append has nowhere
+	// to land, and the record has already been written by then.
+	if err := led.Close(); err != nil {
+		t.Fatalf("close ledger: %v", err)
+	}
+	r.SetLedger(led)
+
+	ref := refusal.New(refusal.SandboxUnavailable, "sandbox", "no namespace on this host")
+	err = r.Refuse(ref)
+	if !errors.Is(err, ErrEventLost) {
+		t.Fatalf("Refuse = %v, want an error wrapping ErrEventLost", err)
+	}
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("loadRecord: %v", err)
+	}
+	if rec.Refusal == nil || rec.Refusal.Code != string(refusal.SandboxUnavailable) {
+		t.Fatalf("record refusal = %+v, want %q recorded despite the lost event", rec.Refusal, refusal.SandboxUnavailable)
+	}
+
+	if err := r.Finish(3); err != nil {
+		t.Fatalf("Finish after a lost event: %v", err)
+	}
+	rec, err = loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("loadRecord after Finish: %v", err)
+	}
+	if rec.State != stateRefused {
+		t.Errorf("state = %q, want %q", rec.State, stateRefused)
+	}
+	if rec.ExitCode == nil || *rec.ExitCode != 3 {
+		t.Errorf("exit code = %v, want 3", rec.ExitCode)
+	}
+}
+
 // TestRefuseAppendsOneRefusalEvent is #59's claim at the record: a refusal is
 // one event in the run's stream, at the stage that refused, carrying the same
 // code, reason and evidence run.json holds. A run with no stream still records
