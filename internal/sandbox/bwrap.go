@@ -176,8 +176,10 @@ func mount(root, configured, name string) (string, error) {
 // The shape is checked rather than trusted, because the .git file is inside
 // the worktree a previous run wrote to. A .git file must name a linked
 // worktree: <common>/worktrees/<name> with a commondir, a HEAD file and an
-// objects directory above it. Anything else is refused, so a crafted file
-// naming /root/.ssh — or another repository's .git — never reaches the mount.
+// objects directory above it, and anything else is refused — /root/.ssh is
+// not a gitdir at all. Which directory the file names is still its word; only
+// the shape is provable here. The bind is read-only, so the most a crafted
+// file can buy is reading another repository's metadata, never writing it.
 func gitMount(worktree string) (string, error) {
 	path := filepath.Join(worktree, ".git")
 	info, err := os.Lstat(path)
