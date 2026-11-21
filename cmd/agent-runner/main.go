@@ -137,11 +137,12 @@ func runAudited(ctx context.Context, wd, task string, llm agent.LLM, toolset age
 // That is a narrowing of the claim, not a silent exclusion — the audit never
 // says it watched a repository when the whole of it was the run's to write.
 func snapshotHost(runDir string) (audit.Snapshot, error) {
-	// os.Getwd keeps the spelling the caller walked through, and git prints the
-	// physical one. Two spellings for one directory would put the checkout's
-	// walk on the physical path and the ignore on the typed one, and the run's
-	// own writes would come back as drift on a clean run. Resolve once and use
-	// that path for both.
+	// os.Getwd keeps the spelling the caller walked through, git prints the
+	// physical one, and $HOME is often a symlink of its own. The watchlist and
+	// the ignores only line up when every path they are built from is the same
+	// physical spelling the walk produces, so each one is resolved once here:
+	// a run directory under a symlinked home otherwise has its own writes read
+	// as drift.
 	resolved, err := filepath.EvalSymlinks(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory %s: %w", runDir, err)
@@ -151,13 +152,18 @@ func snapshotHost(runDir string) (audit.Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("locate home directory: %w", err)
 	}
+	home = canonical(home)
 	stateBase, err := runrec.StateBase()
 	if err != nil {
 		return nil, err
 	}
+	stateBase = canonical(stateBase)
 	repo, err := repoRoot(runDir)
 	if err != nil {
 		return nil, err
+	}
+	if repo != "" {
+		repo = canonical(repo)
 	}
 	if repo != "" && sameDir(repo, runDir) {
 		repo = ""
@@ -166,12 +172,22 @@ func snapshotHost(runDir string) (audit.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Take skips a root an ignore already covers without a word. A watchlist
-	// that was excluded in full would then report no drift on nothing watched,
-	// which is the shape of bug that made #54 split in the first place, so say
-	// it instead of auditing an empty host.
+	// Take skips a root an ignore already covers without a word, and a root
+	// that does not exist without a word too. A watchlist excluded in full
+	// would then report no drift on nothing watched — the shape of bug that
+	// made #54 split — and a home that silently contributed nothing is the
+	// same lie one step quieter, so name both instead of auditing a machine
+	// that was only partly sampled.
 	if len(snap) == 0 {
 		return nil, errors.New("audit: every watchlist root was excluded; nothing was watched")
+	}
+	if _, ok := snap[home]; !ok {
+		return nil, fmt.Errorf("audit: %s was not watched", home)
+	}
+	if repo != "" {
+		if _, ok := snap[repo]; !ok {
+			return nil, fmt.Errorf("audit: the checkout %s was not watched", repo)
+		}
 	}
 	return snap, nil
 }
@@ -223,11 +239,14 @@ func repoRoot(dir string) (string, error) {
 	if !errors.As(err, &exit) {
 		return "", fmt.Errorf("run git rev-parse in %s: %w", dir, err)
 	}
-	// git's answer for "not inside a work tree" is fatal, exit 128. Any other
-	// failure — a broken config, a missing object, a filesystem that refused —
-	// is not that answer and must not read as one.
+	// git's answer for "discovery found no repository" names its search scope in
+	// parentheses and exits 128. A message that names a path after the colon —
+	// "not a git repository: <path>", which a broken submodule gitdir prints
+	// with the same exit code — is a repository git refused to open, and a
+	// repository it refused to describe has to stop the run, not read as
+	// nothing to watch.
 	msg := strings.TrimSpace(stderr.String())
-	if exit.ExitCode() == 128 && strings.Contains(msg, "not a git repository") {
+	if exit.ExitCode() == 128 && strings.Contains(msg, "not a git repository") && !strings.Contains(msg, "not a git repository: ") {
 		return "", nil
 	}
 	return "", fmt.Errorf("git rev-parse --show-toplevel in %s: %v: %s", dir, err, msg)
@@ -256,6 +275,21 @@ func gitReadEnv() []string {
 		}
 	}
 	return append(env, "LC_ALL=C")
+}
+
+// canonical is the physical spelling of path, symlinks followed. A path that
+// does not exist yet — the state directory before the first run — is resolved
+// as far as its parent, so the answer still lines up with the walk once the
+// directory appears.
+func canonical(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path
+	}
+	return filepath.Join(canonical(parent), filepath.Base(path))
 }
 
 // contains reports whether root is dir or one of its ancestors, by path

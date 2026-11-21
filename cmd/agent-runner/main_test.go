@@ -428,6 +428,42 @@ func TestSnapshotFollowsTheRunDirectoryThroughASymlink(t *testing.T) {
 	}
 }
 
+// TestRunAuditedUnderASymlinkedHome is the follow-up blocker: $HOME is often
+// a symlink, and a run in a directory under it must not have its own writes
+// read as drift, any more than a run under a symlinked checkout may.
+func TestRunAuditedUnderASymlinkedHome(t *testing.T) {
+	realHome := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(realHome, home); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	t.Setenv("HOME", home)
+	runDir := filepath.Join(home, "project")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	registry, err := tools.New(runDir)
+	if err != nil {
+		t.Fatalf("tools.New: %v", err)
+	}
+
+	if _, err := runAudited(context.Background(), runDir, "tidy up",
+		writingLLM{path: filepath.Join(runDir, "note.txt")}, registry); err != nil {
+		t.Fatalf("a write in the run directory was refused: %v", err)
+	}
+}
+
+// TestSnapshotRefusesAHomeItDidNotWatch pins the guard: Take skips a root that
+// does not exist without a word, so a home that was never sampled used to read
+// as a clean run over a machine the audit had half seen.
+func TestSnapshotRefusesAHomeItDidNotWatch(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "gone")
+	t.Setenv("HOME", home)
+	if _, err := snapshotHost(t.TempDir()); err == nil {
+		t.Fatalf("a home that does not exist (%s) was reported as watched", home)
+	}
+}
+
 // TestRepoRootIgnoresTheCallersGitEnvironment is the second blocker: an
 // exported GIT_DIR or GIT_CEILING_DIRECTORIES used to make a checkout inside
 // the repository answer "not a git repository", so the run reported clean over
@@ -518,6 +554,15 @@ func TestRepoRootTellsAbsenceFromFailure(t *testing.T) {
 		stubPATH(t, map[string]string{})
 		if _, err := repoRoot(t.TempDir()); err == nil {
 			t.Fatal("a missing git read as \"no repository\"")
+		}
+	})
+	t.Run("a repository git refused to describe", func(t *testing.T) {
+		// A broken submodule gitdir says "not a git repository: <path>" with
+		// exit 128 too. It is a failure to answer, not the absence of a
+		// repository, and reading it as absence would drop the watch.
+		stubPATH(t, map[string]string{"git": "#!/bin/sh\nprintf '%s\\n' 'fatal: not a git repository: /repo/.git/modules/sub' >&2\nexit 128\n"})
+		if _, err := repoRoot(t.TempDir()); err == nil {
+			t.Fatal("a repository git refused to describe read as \"no repository\"")
 		}
 	})
 }
