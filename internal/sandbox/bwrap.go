@@ -57,6 +57,35 @@ var systemReadOnly = []string{
 // report.ErrRefused, because a container built from the wrong path would report
 // a confinement it never had.
 func Args(runDir string, cfg Config) ([]string, error) {
+	return args(runDir, cfg, "")
+}
+
+// ArgsWithWorktree is Args with /work bound to worktree, which need not be a
+// child of runDir. tmp and home are still the run's own, and a worktree that
+// cannot be resolved is a refusal.
+//
+// It exists for the offline `run` command, which executes in the directory it
+// was started in: there is no worktree stage, so the directory the tools are
+// already confined to is the one the container must mount. Binding anything
+// else would report a confinement the runner does not honour. A caller that
+// has a run directory with its own worktree uses Args instead.
+func ArgsWithWorktree(worktree, runDir string, cfg Config) ([]string, error) {
+	if strings.TrimSpace(worktree) == "" {
+		return nil, refuse("sandbox: no worktree")
+	}
+	if strings.TrimSpace(cfg.Worktree) != "" {
+		return nil, refuse("sandbox: an explicit worktree and a configured one are both set")
+	}
+	real, err := resolveDir(worktree)
+	if err != nil {
+		return nil, refuse("sandbox: worktree %s: %v", worktree, err)
+	}
+	return args(runDir, cfg, real)
+}
+
+// args builds one container argv. worktree is the already-resolved /work
+// source, or the empty string to resolve the run's own.
+func args(runDir string, cfg Config, worktree string) ([]string, error) {
 	if strings.TrimSpace(runDir) == "" {
 		return nil, refuse("sandbox: no run directory")
 	}
@@ -67,9 +96,10 @@ func Args(runDir string, cfg Config) ([]string, error) {
 	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return nil, refuse("sandbox: resolve run directory: %v", err)
 	}
-	worktree, err := mount(root, cfg.Worktree, "worktree")
-	if err != nil {
-		return nil, err
+	if worktree == "" {
+		if worktree, err = mount(root, cfg.Worktree, "worktree"); err != nil {
+			return nil, err
+		}
 	}
 	tmp, err := mount(root, cfg.Tmp, "tmp")
 	if err != nil {

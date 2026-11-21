@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/marcus-beauregard/agent-runner/internal/policy"
+	"github.com/marcus-beauregard/agent-runner/internal/sandbox"
 )
 
 const (
@@ -75,6 +76,10 @@ type Registry struct {
 	// the values inside it that a recorded argv must not repeat.
 	env     []string
 	secrets []string
+	// isolation is the argv every command is prefixed with: bubblewrap and its
+	// mounts when the run got a container, nil on the host. It is built once,
+	// because the mounts do not change between commands in one run.
+	isolation []string
 }
 
 // New resolves root to an absolute, symlink-free path and returns a Registry
@@ -104,6 +109,47 @@ func (r *Registry) SetLedger(l Ledger) { r.ledger = l }
 func (r *Registry) SetEnv(env []string) {
 	r.env = env
 	r.secrets = secretValues(env)
+}
+
+// Isolation is where commands run: the mode the run was granted and the
+// directory the mode's scratch space lives in. RunDir is only read for
+// container mode, which needs a tmp and a home to mount.
+type Isolation struct {
+	Mode   sandbox.Mode
+	RunDir string
+}
+
+// SetIsolation puts every later command inside the isolation it names. A
+// worktree run — and the zero Isolation — runs on the host unchanged, because
+// that is what the weaker mode is. Container mode prepends bubblewrap and the
+// mounts from sandbox to every argv.
+//
+// The registry's own root is what /work binds, never a path guessed from
+// RunDir: checkPath already confines every tool to that root, so mounting
+// anything else would report a confinement the runner does not honour.
+//
+// A host that cannot run bwrap is a refusal wrapping report.ErrRefused, which
+// the pipeline maps to exit 3. It is decided here, before the first command,
+// rather than discovered as a failed command in the middle of a run.
+func (r *Registry) SetIsolation(iso Isolation) error {
+	r.isolation = nil
+	switch iso.Mode {
+	case "", sandbox.Worktree:
+		return nil
+	case sandbox.Container:
+	default:
+		return fmt.Errorf("unknown sandbox mode %q", iso.Mode)
+	}
+	args, err := sandbox.ArgsWithWorktree(r.root, iso.RunDir, sandbox.Config{})
+	if err != nil {
+		return err
+	}
+	bin, err := exec.LookPath("bwrap")
+	if err != nil {
+		return refuse("container sandbox unavailable: %v", err)
+	}
+	r.isolation = append([]string{bin}, args...)
+	return nil
 }
 
 // SetTimeout overrides the timeout for one tool. A non-positive duration
@@ -392,7 +438,16 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.timeout(toolRunCommand))
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// The recorded argv stays the command the model asked for: the mounts are
+	// the run's fixed confinement, not something the model chose, and a record
+	// that made it read as if the model had typed --unshare-all would be wrong
+	// about who decided what.
+	bin, cmdArgv := argv[0], argv[1:]
+	if r.isolation != nil {
+		bin = r.isolation[0]
+		cmdArgv = append(append(make([]string, 0, len(r.isolation)+len(argv)), r.isolation[1:]...), argv...)
+	}
+	cmd := exec.CommandContext(ctx, bin, cmdArgv...)
 	cmd.Dir = r.root
 	if r.env != nil {
 		cmd.Env = r.env
