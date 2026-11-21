@@ -88,14 +88,30 @@ func waitGone(t *testing.T, pid int) {
 }
 
 // The ticket's command: the shell backgrounds a child and exits 0. The child
-// inherits the group, so the kill after the command reaches it.
+// inherits the group, so the kill after the command reaches it. The command
+// itself was not stopped, so exit code 0 is true and says nothing about the
+// kill; the record has to name it on its own.
 func TestCommandLeavesNoBackgroundChild(t *testing.T) {
 	allowShell(t)
 	r := newRegistry(t)
-	r.SetLedger(&fakeLedger{})
+	led := &fakeLedger{}
+	r.SetLedger(led)
 	_, _ = run(t, r, `sh -c "sleep 300 & echo $! > child.pid"`)
 	pid := readPID(t, r.root, "child.pid")
 	waitGone(t, pid)
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	exit, ok := led.events[0].data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", led.events[0].data)
+	}
+	if exit.ExitCode != 0 || exit.Killed != "" {
+		t.Fatalf("recorded code %d, killed %q; want 0 and no kill", exit.ExitCode, exit.Killed)
+	}
+	if !exit.Orphans {
+		t.Fatal("record does not name the backgrounded child the group kill reached")
+	}
 }
 
 func TestTimeoutKillsTheProcessGroup(t *testing.T) {

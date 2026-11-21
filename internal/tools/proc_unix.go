@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -14,19 +15,29 @@ import (
 // container sandbox's job (PRD §6.2), not this file's.
 func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return killProcessGroup(cmd) }
-}
-
-// killProcessGroup sends SIGKILL to cmd's process group. It is safe after the
-// leader has exited: the group outlives it while any child is still running.
-func killProcessGroup(cmd *exec.Cmd) error {
-	if cmd.Process == nil {
-		return nil
-	}
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+	cmd.Cancel = func() error {
+		_, err := killProcessGroup(cmd)
 		return err
 	}
-	return nil
+}
+
+// killProcessGroup sends SIGKILL to cmd's process group and reports whether
+// the group still had a member to receive it. It is safe after the leader has
+// exited: the group outlives it while any child is still running. An empty
+// group answers ESRCH, which is not an error here — it means nothing was left
+// behind to kill.
+func killProcessGroup(cmd *exec.Cmd) (bool, error) {
+	if cmd.Process == nil {
+		return false, nil
+	}
+	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // exitStatus reads the code and signal out of a finished process. A process

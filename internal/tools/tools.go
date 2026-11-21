@@ -53,6 +53,9 @@ type Ledger interface {
 // is -1 then, because a killed process has no exit status of its own. Refused
 // names why the tool rejected a result the process produced — "output-limit" or
 // "wait-delay" — so a record never reads as success for a call that failed.
+// Orphans says the command exited on its own and its group still held a member,
+// which the kill after Wait then reached — the case Killed cannot describe,
+// because the command itself was not stopped.
 type commandExit struct {
 	Name       string   `json:"name"`
 	Argv       []string `json:"argv"`
@@ -60,6 +63,7 @@ type commandExit struct {
 	ExitCode   int      `json:"exit_code"`
 	Killed     string   `json:"killed,omitempty"`
 	Refused    string   `json:"refused,omitempty"`
+	Orphans    bool     `json:"orphans,omitempty"`
 	// Env names the environment policy the command ran under, never a value.
 	// "scrubbed" says the child got Env's allowlist; empty says it inherited,
 	// which is what a registry nobody configured still does.
@@ -494,7 +498,7 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	duration := time.Since(start)
 	// The command is over. Anything still in its group was left behind by it:
 	// a backgrounded child, or the whole group when the deadline fired.
-	killProcessGroup(cmd)
+	orphans, _ := killProcessGroup(cmd)
 	code, killed := exitStatus(cmd.ProcessState)
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
@@ -504,6 +508,10 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	}
 	if killed != "" {
 		code = -1
+		// A stopped command's group was killed on purpose and Killed already
+		// says so; this field is for the group that outlived a command that
+		// finished by itself.
+		orphans = false
 	}
 	// Decide the outcome before recording it. The ledger is the run's evidence:
 	// an event that asserts a clean exit for a call the tool refused would be a
@@ -528,6 +536,7 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 		ExitCode:   code,
 		Killed:     killed,
 		Refused:    refused,
+		Orphans:    orphans,
 	}
 	if r.env != nil {
 		entry.Env = scrubbedEnv

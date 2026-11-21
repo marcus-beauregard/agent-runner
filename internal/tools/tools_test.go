@@ -312,6 +312,9 @@ func TestRecordsCommandExit(t *testing.T) {
 	if exit.ExitCode != 0 || exit.Killed != "" {
 		t.Fatalf("exit = code %d, killed %q; want 0 and no kill", exit.ExitCode, exit.Killed)
 	}
+	if exit.Orphans {
+		t.Fatal("record names a killed group for a command that left none behind")
+	}
 	if exit.DurationMS < 0 {
 		t.Fatalf("duration %d ms, want non-negative", exit.DurationMS)
 	}
