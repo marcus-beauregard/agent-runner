@@ -77,18 +77,30 @@ func Watchlist(home, repo string) []string {
 }
 
 // Ignores is the default exclusion list for a run in runDir whose records live
-// under stateBase/agent-runner. The run directory comes first: it is the one
-// exclusion that is not about the OS at all. The program's own bookkeeping is
-// excluded by its exact directory rather than by all of stateBase: state another
-// program owns is a write outside the run like any other, and the audit has to
-// see it.
-func Ignores(home, stateBase, runDir string) []Ignore {
-	return []Ignore{
+// under stateBase/agent-runner, watching the repository at repo. The run
+// directory comes first: it is the one exclusion that is not about the OS at
+// all. The program's own bookkeeping is excluded by its exact directory rather
+// than by all of stateBase: state another program owns is a write outside the
+// run like any other, and the audit has to see it.
+//
+// <repo>/.git/worktrees is excluded for the same reason as the run directory:
+// `git worktree add` registers one there on every run, so on a fresh clone the
+// first run creates it whether or not anything was written outside. What the
+// exclusion covers is exactly that bookkeeping — the rest of .git stays watched.
+func Ignores(home, stateBase, runDir, repo string) []Ignore {
+	ignores := []Ignore{
 		{Prefix: runDir, Why: "the run's own directory is where it is supposed to write"},
 		{Prefix: filepath.Join(home, ".cache"), Why: "caches are rewritten by every tool that runs; a cache write is not an escape"},
 		{Prefix: filepath.Join(stateBase, "agent-runner"), Why: "this program's run records live here and the audit must not flag its own bookkeeping"},
 		{Prefix: filepath.Join(home, ".npm"), Why: "the npm cache is scratch space the toolchain owns"},
 	}
+	if repo != "" {
+		ignores = append(ignores, Ignore{
+			Prefix: filepath.Join(repo, ".git", "worktrees"),
+			Why:    "git records the run's own worktree here; that bookkeeping is the run's write, not an escape",
+		})
+	}
+	return ignores
 }
 
 // Take records the current shape of every watchlist root. A root that does not

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // write puts content at path, creating parents.
@@ -18,11 +19,17 @@ func write(t *testing.T, path, content string) {
 	}
 }
 
+// testRepo is the repository a run under home would be given: inside home, so
+// one snapshot of home covers it too, which is what the real watchlist does.
+func testRepo(home string) string {
+	return filepath.Join(home, "src", "agent-runner")
+}
+
 // runIgnores is the exclusion list a run under home would use, with its state
 // base resolved the way internal/run resolves it.
 func runIgnores(home string) []Ignore {
 	stateBase := filepath.Join(home, ".local", "state")
-	return Ignores(home, stateBase, filepath.Join(stateBase, "agent-runner", "runs", "one"))
+	return Ignores(home, stateBase, filepath.Join(stateBase, "agent-runner", "runs", "one"), testRepo(home))
 }
 
 func take(t *testing.T, paths []string, ignores []Ignore) Snapshot {
@@ -121,6 +128,32 @@ func TestChangedFileReportsSizeAndTime(t *testing.T) {
 	}
 }
 
+// TestSameSizeRewriteReportsMtime covers the edit the size cannot see. A rewrite
+// that keeps the length still moves the clock, and the mtime half of fileDrift is
+// the only thing that reports it: drop that half and this test fails while the
+// size test above still passes.
+func TestSameSizeRewriteReportsMtime(t *testing.T) {
+	home := t.TempDir()
+	file := filepath.Join(home, "notes.txt")
+	write(t, file, "abcdefghij")
+	before := take(t, []string{home}, nil)
+
+	write(t, file, "klmnopqrst") // same length, new contents
+	later := before[file].ModTime.Add(2 * time.Second)
+	if err := os.Chtimes(file, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	after := take(t, []string{home}, nil)
+
+	d, ok := findDrift(Compare(before, after), file)
+	if !ok || d.Kind != "changed" {
+		t.Fatalf("drift = %+v (found %v), want %s changed", d, ok, file)
+	}
+	if !strings.Contains(d.Detail, "mtime") || strings.Contains(d.Detail, "size") {
+		t.Fatalf("detail = %q, want the mtime alone: the size did not change", d.Detail)
+	}
+}
+
 // TestNestedFileEditIsInvisible pins the depth this audit watches, so the wiring
 // in #85 is written against the real boundary and not against the old comment.
 // A file one level below a root carries a name and no size, so editing it in
@@ -148,7 +181,7 @@ func TestRunDirectoryIsExcluded(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		t.Fatalf("mkdir run: %v", err)
 	}
-	ignores := Ignores(home, stateBase, runDir)
+	ignores := Ignores(home, stateBase, runDir, testRepo(home))
 	before := take(t, []string{home}, ignores)
 	write(t, filepath.Join(runDir, "REPORT.md"), "the run wrote this")
 	after := take(t, []string{home}, ignores)
@@ -175,8 +208,12 @@ func TestNamedExclusions(t *testing.T) {
 	if drift := Compare(before, after); len(drift) != 0 {
 		t.Fatalf("a cache write produced drift: %v", drift)
 	}
-	if ignored("/home/agent-other/notes.txt", ignores) {
-		t.Fatal("an exclusion leaked into a neighbouring directory")
+	// The separator guard is what keeps a neighbour of an excluded directory
+	// visible. The paths are built from the temp home so they share a string
+	// prefix with a real exclusion: without the guard, ".cache2" matches the
+	// exclusion written for ".cache".
+	if ignored(filepath.Join(home, ".cache2", "notes.txt"), ignores) {
+		t.Fatal("an exclusion leaked into the neighbouring directory " + filepath.Join(home, ".cache2"))
 	}
 	if !ignored(filepath.Join(home, ".local", "state", "agent-runner", "runs", "one", "REPORT.md"), ignores) {
 		t.Fatal("a path inside the run directory was not excluded")
@@ -187,6 +224,34 @@ func TestNamedExclusions(t *testing.T) {
 	// gets blessed with a reason.
 	if ignored(filepath.Join(home, ".local", "state", "other", "note.json"), ignores) {
 		t.Fatal("an unrelated program's state was excluded from the audit")
+	}
+}
+
+// TestWorktreeRegistrationIsExcluded is the fresh-clone case: `git worktree add`
+// creates <repo>/.git/worktrees on the first run, and an audit that reported it
+// would refuse a run that changed nothing. The rest of .git stays watched, so the
+// exclusion is as narrow as its reason.
+func TestWorktreeRegistrationIsExcluded(t *testing.T) {
+	home := t.TempDir()
+	repo := testRepo(home)
+	write(t, filepath.Join(repo, ".git", "HEAD"), "ref: refs/heads/main\n")
+	ignores := runIgnores(home)
+	before := take(t, Watchlist(home, repo), ignores)
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "run-one"), 0o700); err != nil {
+		t.Fatalf("mkdir worktree bookkeeping: %v", err)
+	}
+	after := take(t, Watchlist(home, repo), ignores)
+	if drift := Compare(before, after); len(drift) != 0 {
+		t.Fatalf("registering a worktree produced drift: %v", drift)
+	}
+
+	// A write to the rest of .git is still a write outside the run.
+	packed := filepath.Join(repo, ".git", "packed-refs")
+	write(t, packed, "refs/heads/main\n")
+	written := take(t, Watchlist(home, repo), ignores)
+	if d, ok := findDrift(Compare(after, written), packed); !ok || d.Kind != "added" {
+		t.Fatalf("drift = %+v (found %v), want %s added", d, ok, packed)
 	}
 }
 
