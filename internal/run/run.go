@@ -41,8 +41,9 @@ const (
 	stateFailed     = "failed"      // gate failed (2) or anything unexpected (1)
 )
 
-// Meta is what the caller knows about a run before it starts. Every field is
-// recorded verbatim; none of it is interpreted here.
+// Meta is what the caller knows about a run before it starts, recorded as
+// given. Worktree later replaces Repo, Branch and BaseSHA with the values it
+// resolved — the parent it actually ran git in, and the branch it created.
 type Meta struct {
 	Kind    string // "build", "resolve" or "amend"
 	Subject string // the issue or pull request URL

@@ -892,3 +892,53 @@ func TestFinishKeepsAWorktreeOnAnotherBranch(t *testing.T) {
 		t.Errorf("cleanup discarded work that is on no branch the run owns: %v", err)
 	}
 }
+
+// TestFinishCleansALegacyRecordWhoseTreeIsGone is the same pre-field record
+// after the directory was deleted out of band: nothing is on disk, the parent
+// still lists the entry, and returning early would finish done over exactly
+// the orphan the ticket is about. The parent is asked, the entry is pruned, and
+// the step is recorded.
+func TestFinishCleansALegacyRecordWhoseTreeIsGone(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	path := filepath.Join(r.Dir, "run.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatalf("decode record: %v", err)
+	}
+	delete(legacy, "worktree")
+	data, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("encode record: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish(0): %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("legacy record left a registration behind:\\n%s", list)
+	}
+	removed := false
+	for _, e := range readEvents(t, r.Dir) {
+		if e.Kind == kindWorktreeRemove {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Errorf("stream has no %s: the prune happened without being recorded", kindWorktreeRemove)
+	}
+}

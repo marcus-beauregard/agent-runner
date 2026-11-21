@@ -18,9 +18,8 @@ import (
 const slugMax = 40
 
 // The two events a worktree's recorded life consists of. Worktree appends the
-// first and CleanupWorktree the second; cleanup reads the first to tell a run
-// that never got a tree — a refusal at triage, a dry run — from one whose tree
-// was removed by hand and still needs its registration pruned.
+// first and CleanupWorktree the second. Cleanup decides from the record, not
+// the stream; the events are the report's history of the same facts.
 const (
 	kindWorktreeAdd    = "worktree:add"
 	kindWorktreeRemove = "worktree:remove"
@@ -340,19 +339,24 @@ func CleanupWorktree(runDir string, code int) error {
 		return nil
 	}
 	// A record written before the field existed may still have a tree at the
-	// fixed location. RemoveWorktree takes that fallback; cleanup has to take
-	// the same path, or it finishes done over a live registration. The tree has
-	// to be there: with no field and no tree there is nothing this run can
-	// prove, and inventing a path would turn a record that never had a
-	// worktree into a failed cleanup.
+	// fixed location — or only its registration, if the directory was deleted
+	// out of band. The parent is asked, not the filesystem: an entry that is
+	// listed still needs pruning and the removal still needs recording, and
+	// that is the orphan this ticket exists to close. A record with neither a
+	// listed entry nor a directory never had one this run can act on.
 	wt := rec.Worktree
 	if wt == "" {
 		wt = filepath.Join(runDir, "worktree")
-		if _, err := os.Lstat(wt); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+		listed := false
+		if rec.Repo != "" {
+			if l, lerr := worktreeListed(rec.Repo, wt); lerr == nil {
+				listed = l
+			}
+		}
+		if !listed {
+			if _, serr := os.Lstat(wt); errors.Is(serr, os.ErrNotExist) {
 				return nil
 			}
-			return err
 		}
 	}
 	data := worktreeRemove{Path: wt, ExitCode: code}
