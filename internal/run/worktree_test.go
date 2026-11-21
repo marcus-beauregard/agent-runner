@@ -451,6 +451,52 @@ func TestRemoveWorktreeDropsALockedRegistration(t *testing.T) {
 	}
 }
 
+// TestRemoveWorktreeProvesRemovalBehindASymlink covers the run directory that
+// sits behind a symlink, which $HOME is on plenty of boxes. git records the
+// path it resolved, not the one it was handed, so comparing the two cleaned
+// spellings finds nothing. A tree whose own .git pointer is damaged is the case
+// that makes the miss matter: worktree remove refuses it, prune exits 0 and
+// leaves the locked registration standing, and the list comparison then
+// reported success over a checkout that was still on disk and still registered.
+// Both proofs have to hold whatever the spelling is.
+func TestRemoveWorktreeProvesRemovalBehindASymlink(t *testing.T) {
+	parent := worktreeParent(t)
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(link, Meta{Kind: "build", Subject: cageSubject, Repo: parent})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	// Damage the tree's own git pointer, then lock the registration: remove
+	// cannot drop it and prune will not.
+	if err := os.Remove(filepath.Join(wt, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, parent, "worktree", "lock", wt)
+
+	if err := RemoveWorktree(r.Dir); err == nil {
+		t.Fatal("RemoveWorktree = nil, want an error: the tree is still on disk and still registered")
+	}
+	if _, statErr := os.Lstat(wt); statErr != nil {
+		t.Fatalf("the test needs the tree to survive removal, but it is gone: %v", statErr)
+	}
+	resolved := filepath.Join(realDir, "agent-runner", "runs", r.ID, "worktree")
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); !strings.Contains(list, resolved) {
+		t.Fatalf("the test needs the registration to survive under %s:\n%s", resolved, list)
+	}
+}
+
 // TestRequireCleanParentNamesABareParent keeps the refusal readable. A bare
 // parent has no work tree, and the old path reported that as git status
 // failing rather than as a shape the runner does not support.

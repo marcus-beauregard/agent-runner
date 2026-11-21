@@ -231,7 +231,28 @@ func RemoveWorktree(runDir string) error {
 		return fmt.Errorf("remove worktree: %s is still registered in %s (remove: %v; prune: %v)",
 			wt, rec.Repo, orNone(removeErr), orNone(pruneErr))
 	}
+	// The list is git's bookkeeping, and bookkeeping can be unreadable in ways
+	// the comparison cannot see. The directory is the thing itself, so it is
+	// checked too: a tree still on disk was not removed, whatever the list says
+	// and whatever the two exit codes were.
+	if _, statErr := os.Lstat(wt); statErr == nil {
+		return fmt.Errorf("remove worktree: %s is still on disk (remove: %v; prune: %v)",
+			wt, orNone(removeErr), orNone(pruneErr))
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("remove worktree: stat %s: %w", wt, statErr)
+	}
 	return nil
+}
+
+// resolvePath is the form two paths are compared in: symlinks resolved when the
+// path exists, cleaned when it does not. A tree that has been deleted is still
+// worth comparing — "gone" is the answer the caller wants — so a failed resolve
+// is not an error here.
+func resolvePath(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	return filepath.Clean(path)
 }
 
 // orNone renders a nil error as "ok", so a failure message says which of the
@@ -243,17 +264,22 @@ func orNone(err error) string {
 	return err.Error()
 }
 
-// worktreeListed reports whether repo still registers path. Paths are compared
-// cleaned, because git prints what it recorded and the caller may spell it
-// differently — a trailing slash or a redundant separator is the same tree.
+// worktreeListed reports whether repo still registers path. Both sides are
+// resolved before they are compared, because git prints the path it resolved
+// when the tree was added, not the one it was handed: a run directory behind a
+// symlink — $HOME is one on plenty of boxes — is spelled one way here and
+// another in git worktree list. Comparing only the cleaned spellings misses the
+// entry, and a miss is a false success, which is the one answer this function
+// exists to prevent. A path that no longer exists cannot be resolved, so that
+// side falls back to cleaning; the on-disk check in RemoveWorktree still holds.
 func worktreeListed(repo, path string) (bool, error) {
 	out, err := gitRun(repo, "worktree", "list", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("list worktrees: %w", err)
 	}
-	want := filepath.Clean(path)
+	want := resolvePath(path)
 	for _, line := range strings.Split(out, "\n") {
-		if got, ok := strings.CutPrefix(line, "worktree "); ok && filepath.Clean(got) == want {
+		if got, ok := strings.CutPrefix(line, "worktree "); ok && resolvePath(got) == want {
 			return true, nil
 		}
 	}
@@ -265,12 +291,13 @@ func worktreeListed(repo, path string) (bool, error) {
 // PRD §6.3 asks for, and it runs from Finish, which is the one place every
 // terminal path passes through.
 //
-// Only the codes whose work is settled reach here (settledWork in run.go): done,
-// where everything is on the branch, and gate-failed, where the gate rejected
-// it. A run with no terminal state is resumable and keeps its tree, and so does
-// a run that stopped holding edits — refused, failed, or waiting for a person —
-// because the two --force flags below would discard the only copy of them. gc
-// collects those by age (PRD §6.3).
+// Only a run whose work is settled reaches here (settledWork in run.go), which
+// is done and nothing else: every edit is on the branch the PR was opened from,
+// so the checkout is scratch and regenerable. A gate-failed run keeps its tree
+// because nothing it wrote ever reached the branch — that tree is the only copy
+// of the attempt and of why the gate said no. Refused, failed and waiting for a
+// person keep theirs for the same reason, and a run with no terminal state is
+// resumable. gc collects all of those by age (PRD §6.3).
 //
 // It is a no-op for a run that never got a worktree. The ledger decides that,
 // not the filesystem: a tree already removed by hand still needs its
