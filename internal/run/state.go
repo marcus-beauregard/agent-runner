@@ -180,6 +180,10 @@ func Begin(ctx context.Context, base string, meta Meta, fetch FetchFunc, exclude
 	if same {
 		return s, nil
 	}
+	// The record says which account it excluded, because replay recomputes the
+	// action set with the same classifier and a run's own reply reads as a
+	// question the thread still owes without it (§8).
+	meta.Account = excludeAuthor
 	r, err := New(base, meta)
 	if err != nil {
 		return Start{}, err

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
+	"github.com/marcus-beauregard/agent-runner/internal/world"
 )
 
 // stubGH puts a gh on PATH that prints out and exits with code, so the tests
@@ -168,5 +169,53 @@ func TestWorkWithoutRunDirWritesNothing(t *testing.T) {
 		if len(entries) != 0 {
 			t.Errorf("%s holds %d entries, want none", dir, len(entries))
 		}
+	}
+}
+
+// TestReplayCommand is the exit-code side of the ticket: a record that replays
+// cleanly exits 0, one whose recorded set disagrees with its own world exits 1,
+// and a directory that does not name its account is refused rather than guessed.
+func TestReplayCommand(t *testing.T) {
+	snapshot := world.World{
+		Subject:  "https://example.test/pull/8",
+		Issue:    world.Issue{Number: 7, State: "OPEN"},
+		PR:       world.PR{Number: 8, State: "open", Mergeable: world.MergeableNo},
+		Comments: []world.Comment{{ID: 100, Author: "someone"}},
+	}
+	tests := []struct {
+		name     string
+		account  string
+		spend    bool
+		wantCode int
+	}{
+		{name: "matching record", account: "marcus-beauregard", spend: true, wantCode: 0},
+		{name: "record disagrees", account: "marcus-beauregard", wantCode: 1},
+		{name: "no account recorded", wantCode: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := runrec.New(t.TempDir(), runrec.Meta{Kind: "resolve", Subject: snapshot.Subject, Account: tc.account})
+			if err != nil {
+				t.Fatalf("create run: %v", err)
+			}
+			if err := runrec.SaveWorld(r.Dir, snapshot); err != nil {
+				t.Fatalf("save world: %v", err)
+			}
+			if tc.spend {
+				l, err := runrec.OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+				if err != nil {
+					t.Fatalf("open ledger: %v", err)
+				}
+				if err := l.Spend("comment:100", "answered #100"); err != nil {
+					t.Fatalf("spend: %v", err)
+				}
+				if err := l.Close(); err != nil {
+					t.Fatalf("close ledger: %v", err)
+				}
+			}
+			if code := run([]string{"replay", r.Dir}); code != tc.wantCode {
+				t.Errorf("replay exit = %d, want %d", code, tc.wantCode)
+			}
+		})
 	}
 }

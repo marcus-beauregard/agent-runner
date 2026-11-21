@@ -48,6 +48,8 @@ func run(args []string) int {
 		return work(ctx, args[1:])
 	case "report":
 		return reportRun(args[1:])
+	case "replay":
+		return replayRun(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "agent-runner: unknown command: %s\n", args[0])
 		return 1
@@ -205,6 +207,38 @@ func reportRun(args []string) int {
 	return 0
 }
 
+// replayRun proves a recorded run still plans what it planned: it recomputes
+// the action set from the run's World snapshot and compares it with the trigger
+// rows in the ledger. Writes are suppressed by construction — nothing on this
+// path opens a file for writing — so it is safe on a live run's directory too.
+//
+// A record that no longer agrees with its own world exits 1: the run did not
+// do what its record says, and that is a failure of the record, not a refusal
+// or a gate.
+func replayRun(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "agent-runner: replay: exactly one run directory is required")
+		return 1
+	}
+	if args[0] == "-h" || args[0] == "--help" {
+		usage(os.Stdout)
+		return 0
+	}
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "agent-runner: replay: exactly one run directory is required")
+		return 1
+	}
+	ok, err := runrec.Replay(args[0], os.Stdout)
+	if err != nil {
+		return fail(err)
+	}
+	if !ok {
+		fmt.Fprintln(os.Stderr, "agent-runner: replay: the record's action set is not what its own world yields")
+		return 1
+	}
+	return 0
+}
+
 // fail prints one line to stderr and returns the exit code for err.
 func fail(err error) int {
 	fmt.Fprintf(os.Stderr, "agent-runner: %v\n", err)
@@ -219,6 +253,7 @@ Usage:
   agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>] --dry-run
                                                                  plan the work, writing nothing but the run record
   agent-runner report <id> [--run-dir <dir>]                     print REPORT.md for a recorded run
+  agent-runner replay <run-dir>                                  prove a recorded run's action set from its own record
   agent-runner --help                                            show this help
   agent-runner --version                                         print the version
 `)
