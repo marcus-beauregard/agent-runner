@@ -368,3 +368,33 @@ func TestRememberRefusedDoesNotRecord(t *testing.T) {
 		}
 	}
 }
+
+// TestRememberAfterAFailedCleanupDoesNotRecord is the pair that matters: the
+// caller holds code 0, but Finish failed the run because the checkout could not
+// be discarded. Recording that digest would let the next run exit 0 unchanged
+// over a change that exists only in the kept tree.
+func TestRememberAfterAFailedCleanupDoesNotRecord(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	parent := worktreeParent(t)
+	fetch := func(context.Context, string) (world.World, error) { return testWorld(testSubject), nil }
+	meta := Meta{Kind: "resolve", Subject: testSubject, Repo: parent}
+
+	start, err := Begin(ctx, base, meta, fetch, "")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, _, err := Worktree(start.Run.Dir, parent, Slug(testSubject, start.Run.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	writeTestFile(t, filepath.Join(start.Run.Dir, "worktree", "only-copy.txt"), "wip\n")
+	if err := start.Run.Finish(0); err == nil {
+		t.Fatal("Finish(0) = nil, want the kept checkout to fail the run")
+	}
+	if err := start.Remember(0); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+	if _, err := LoadState(base, "resolve", testSubject); !errors.Is(err, ErrNoState) {
+		t.Fatalf("a run failed by cleanup recorded a digest: %v", err)
+	}
+}
