@@ -21,11 +21,18 @@ const (
 	kindDecision = "decision"
 )
 
-// stageUnattributed is where a gate or a decision that recorded no stage is
-// reported. Event.Stage is optional, and dropping such an event would hide the
-// only evidence that a gate ran — and silence can only make a report read more
-// reassuring than the record it came from.
-const stageUnattributed = "(unattributed)"
+// stageLabel names a stage in the document. Event.Stage is optional, and a gate
+// or decision that recorded no stage is still evidence the run did something:
+// dropping it would hide the only proof a gate ran, and silence can only make a
+// report read more reassuring than the record. Such events are gathered under
+// the empty name — never under a name a writer could also choose — and printed
+// as unattributed.
+func stageLabel(name string) string {
+	if name == "" {
+		return "(unattributed)"
+	}
+	return name
+}
 
 // stageData is the payload of a stage event. "start" and "finish" are the two
 // phases §5 names, and hash is the output hash a finish carries — the only thing
@@ -179,26 +186,18 @@ func collect(events []Event) ([]stageRow, []gateRow, error) {
 				s.hash = d.Hash
 			}
 		case kindGate:
-			stage := e.Stage
-			if stage == "" {
-				stage = stageUnattributed
-			}
 			var d gateData
 			if err := decodeData(e, &d); err != nil {
 				return nil, nil, err
 			}
-			index(stage)
-			gates = append(gates, gateRow{stage: stage, gateData: d})
+			index(e.Stage)
+			gates = append(gates, gateRow{stage: e.Stage, gateData: d})
 		case kindDecision:
-			stage := e.Stage
-			if stage == "" {
-				stage = stageUnattributed
-			}
 			var d decisionData
 			if err := decodeData(e, &d); err != nil {
 				return nil, nil, err
 			}
-			s := &stages[index(stage)]
+			s := &stages[index(e.Stage)]
 			s.decisions = append(s.decisions, d)
 		}
 	}
@@ -246,7 +245,7 @@ func writeHeader(b *strings.Builder, rec *record) {
 // writeStage prints one stage: whether it started, whether it finished, the hash
 // it finished with, and the questions it recorded on the way.
 func writeStage(b *strings.Builder, s stageRow) {
-	fmt.Fprintf(b, "## %s\n\n", s.name)
+	fmt.Fprintf(b, "## %s\n\n", stageLabel(s.name))
 	switch {
 	case !s.started.IsZero() && !s.finished.IsZero():
 		fmt.Fprintf(b, "- Started: %s\n- Finished: %s\n", stamp(s.started), stamp(s.finished))
@@ -282,7 +281,7 @@ func writeGates(b *strings.Builder, gates []gateRow) {
 			exit, took, tail = "skipped", "—", g.Skipped
 		}
 		fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n",
-			cell(g.stage), cell(g.Command), exit, took, cell(tail))
+			cell(stageLabel(g.stage)), cell(g.Command), exit, took, cell(tail))
 	}
 	b.WriteString("\n")
 }
@@ -296,7 +295,8 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 	for _, s := range stages {
 		// A stage known only from a gate or a decision has no start to resume
 		// from; claiming it "started" would contradict the section above it.
-		if s.finished.IsZero() && s.name != stageUnattributed {
+		// The unattributed bucket is not a stage, so it is never named as one.
+		if s.name != "" && s.finished.IsZero() {
 			if s.started.IsZero() {
 				items = append(items, fmt.Sprintf("Stage %s recorded no stage events; its work cannot be confirmed from the record.", s.name))
 			} else {
@@ -305,7 +305,7 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 		}
 		for _, d := range s.decisions {
 			if d.Answer == "" {
-				items = append(items, fmt.Sprintf("Stage %s left a question open: %q", s.name, d.Question))
+				items = append(items, fmt.Sprintf("Stage %s left a question open: %q", stageLabel(s.name), d.Question))
 			}
 		}
 	}
@@ -320,7 +320,12 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 	switch {
 	case rec.State == stateRunning:
 		items = append(items, "The record still says running: the run is resumable, not finished.")
-	case rec.State != "" && rec.State != stateDone:
+	case rec.State == "":
+		// loadRecord accepts a record with no state. It is not done — nothing in
+		// it says so — and a report that guessed would be inventing the one
+		// field that decides whether the run is finished.
+		items = append(items, "The record does not say what state it is in; treat it as unfinished.")
+	case rec.State != stateDone:
 		// Only done owes nothing. A refused, needs_human or failed record with a
 		// tidy event stream still stopped early, and this section is the one a
 		// reader trusts to say so — it must never print "Nothing" over a

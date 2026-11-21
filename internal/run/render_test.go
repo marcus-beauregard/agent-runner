@@ -292,6 +292,52 @@ func TestRenderReportUnattributedEvents(t *testing.T) {
 	}
 }
 
+// TestRenderReportUnattributedGatePasses is the other half of the vanishing-gate
+// rule: a gate that passed is as much evidence as one that failed. A regression
+// that kept only failing gates would otherwise leave the suite green, and the
+// table would quietly lose a row.
+func TestRenderReportUnattributedGatePasses(t *testing.T) {
+	r, _ := newTestRun(t)
+	appendEvent(t, r, "gate", "", gateData{Command: "gofmt -l .", DurationMS: 5})
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "| (unattributed) | gofmt -l . | 0 | 5ms |") {
+		t.Errorf("report dropped a stage-less gate that passed\n---\n%s", got)
+	}
+	if strings.Contains(got, "Stage (unattributed)") {
+		t.Errorf("the unattributed bucket is named as a stage\n---\n%s", got)
+	}
+}
+
+// TestRenderReportStatelessRecord: loadRecord accepts a run.json with no state,
+// and the report must not guess one. "The record says done" over a file that
+// says nothing is the same lie in a quieter form.
+func TestRenderReportStatelessRecord(t *testing.T) {
+	r, _ := newTestRun(t)
+	path := filepath.Join(r.Dir, "run.json")
+	rec := []byte("{\"id\":\"" + r.ID + "\",\"kind\":\"build\"}")
+	if err := os.WriteFile(path, rec, 0o600); err != nil {
+		t.Fatalf("write run.json: %v", err)
+	}
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	if strings.Contains(got, "- State:") {
+		t.Errorf("the header invented a state\n---\n%s", got)
+	}
+	if strings.Contains(got, "says done") {
+		t.Errorf("the report claims a stateless record says done\n---\n%s", got)
+	}
+	if !strings.Contains(got, "does not say what state") {
+		t.Errorf("the report does not flag the missing state\n---\n%s", got)
+	}
+}
+
 // TestLocate keeps an id a name: the right directory is found, and anything that
 // is not a run under base is ErrNoRecord rather than a path somebody chose.
 func TestLocate(t *testing.T) {
