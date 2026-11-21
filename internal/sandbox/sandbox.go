@@ -17,8 +17,9 @@ import (
 	"github.com/marcus-beauregard/agent-runner/internal/report"
 )
 
-// Mode is the isolation a run actually got. The values are what run.json records
-// and what the report prints, so they are stable strings rather than numbers.
+// Mode is the isolation a run got. The values are stable strings rather than
+// numbers, because a run record outlives the code that wrote it and has to stay
+// readable without it. (#87 puts them in run.json and the report.)
 type Mode string
 
 const (
@@ -58,18 +59,22 @@ const probeTimeout = 5 * time.Second
 // Presence of the binary is not evidence it works: bubblewrap can be installed
 // and still fail to build a namespace when user namespaces are unavailable or
 // the kernel is locked down, so the check runs the cheapest command that proves
-// otherwise. The network namespace is checked separately because container mode
-// is only worth the name when children cannot reach the internet (§6.2), and
-// unshare permission is a different permission from bwrap's.
+// otherwise. It asks for the network namespace in the same command, because
+// container mode is only worth the name when children cannot reach the internet
+// (§6.2), and a probe that skipped it would answer yes for a mode this program
+// could not deliver.
+//
+// The namespace is unshared inside bubblewrap's own user namespace, not by
+// unshare in the caller's: `unshare --net true` needs CAP_SYS_ADMIN here and
+// fails for an unprivileged user on hosts where bwrap works perfectly well, so
+// probing it separately would refuse container mode on exactly the rootless
+// hosts bubblewrap exists to serve.
 func Detect(ctx context.Context) (bool, string) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		return false, "bubblewrap is not installed"
 	}
-	if err := run(ctx, "bwrap", "--ro-bind", "/", "/", "true"); err != nil {
-		return false, fmt.Sprintf("bubblewrap cannot build a namespace: %v", err)
-	}
-	if err := run(ctx, "unshare", "--net", "true"); err != nil {
-		return false, fmt.Sprintf("unshare --net is not permitted: %v", err)
+	if err := run(ctx, "bwrap", "--ro-bind", "/", "/", "--unshare-net", "true"); err != nil {
+		return false, fmt.Sprintf("bubblewrap cannot build an isolated namespace: %v", err)
 	}
 	return true, ""
 }

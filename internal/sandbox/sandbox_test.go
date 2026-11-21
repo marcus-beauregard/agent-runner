@@ -180,11 +180,10 @@ func TestDetectRefusesWhenNoNamespaceCanBeBuilt(t *testing.T) {
 			name: "network namespace not permitted",
 			stubs: func(t *testing.T) {
 				stubTools(t, map[string]string{
-					"bwrap":   "#!/bin/sh\nexit 0\n",
-					"unshare": "#!/bin/sh\necho 'unshare: unshare failed: Operation not permitted'\nexit 1\n",
+					"bwrap": "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --unshare-net ] && { echo 'bwrap: setting up network namespace: Operation not permitted' >&2; exit 1; }; done\nexit 0\n",
 				})
 			},
-			wantName: "unshare --net",
+			wantName: "bubblewrap",
 		},
 	}
 	for _, tc := range tests {
@@ -201,13 +200,14 @@ func TestDetectRefusesWhenNoNamespaceCanBeBuilt(t *testing.T) {
 	}
 }
 
-// TestDetectAcceptsAWorkingHost is the other side: both probes succeed and
-// detection says yes. Without it, a Detect that always returned false would pass
-// every refusal test above.
+// TestDetectAcceptsAWorkingHost is the other side: bubblewrap builds a
+// namespaced, networkless child and detection says yes. Without it, a Detect that
+// always returned false would pass every refusal test above. The stub exits 0
+// only when it is asked to drop the network, so this also fails if detection
+// stops asking — a container that can reach the internet is not container mode.
 func TestDetectAcceptsAWorkingHost(t *testing.T) {
 	stubTools(t, map[string]string{
-		"bwrap":   "#!/bin/sh\nexit 0\n",
-		"unshare": "#!/bin/sh\nexit 0\n",
+		"bwrap": "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --unshare-net ] && exit 0; done\necho 'bwrap: no network namespace requested' >&2\nexit 1\n",
 	})
 	ok, reason := Detect(context.Background())
 	if !ok {
