@@ -398,3 +398,25 @@ func TestRememberAfterAFailedCleanupDoesNotRecord(t *testing.T) {
 		t.Fatalf("a run failed by cleanup recorded a digest: %v", err)
 	}
 }
+
+// TestRememberWithAnUnreadableRecordDoesNotRecord is the branch that makes the
+// guard above it honest: a run.json that cannot be read says nothing about how
+// the run ended, so it cannot stand in for proof that the work was done.
+func TestRememberWithAnUnreadableRecordDoesNotRecord(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	fetch := func(context.Context, string) (world.World, error) { return testWorld(testSubject), nil }
+	meta := Meta{Kind: "resolve", Subject: testSubject}
+
+	start, err := Begin(ctx, base, meta, fetch, "")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	writeTestFile(t, filepath.Join(start.Run.Dir, "run.json"), "{not json")
+	if err := start.Remember(0); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+	if _, err := LoadState(base, "resolve", testSubject); !errors.Is(err, ErrNoState) {
+		t.Fatalf("an unreadable record recorded a digest: %v", err)
+	}
+}

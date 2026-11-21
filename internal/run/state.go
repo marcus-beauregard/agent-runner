@@ -219,7 +219,11 @@ func (s Start) Remember(code int) error {
 	// change. Remembering that digest would let the next run exit 0 unchanged
 	// over a change nobody answered. The record decides; a record that cannot be
 	// read is not proof the work is done, so it records nothing either.
-	if rec, err := loadRecord(s.Run.Dir); err == nil && rec.State != stateRunning && rec.State != stateDone {
+	rec, err := loadRecord(s.Run.Dir)
+	if err != nil {
+		return nil
+	}
+	if rec.State != stateRunning && rec.State != stateDone {
 		return nil
 	}
 	return SaveState(s.Base, s.Kind, s.Subject, State{Digest: s.Digest, UpdatedAt: time.Now().UTC()})
