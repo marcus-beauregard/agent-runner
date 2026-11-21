@@ -312,6 +312,9 @@ func TestRecordsCommandExit(t *testing.T) {
 	if exit.ExitCode != 0 || exit.Killed != "" {
 		t.Fatalf("exit = code %d, killed %q; want 0 and no kill", exit.ExitCode, exit.Killed)
 	}
+	if exit.Orphans {
+		t.Fatal("record names a killed group for a command that left none behind")
+	}
 	if exit.DurationMS < 0 {
 		t.Fatalf("duration %d ms, want non-negative", exit.DurationMS)
 	}
@@ -346,6 +349,32 @@ func TestRefusedOutputIsRecorded(t *testing.T) {
 	}
 	if exit.ExitCode != 0 {
 		t.Fatalf("recorded exit code %d, want the process's own 0", exit.ExitCode)
+	}
+}
+
+// A kill that fails must not leave a record claiming nothing was left behind:
+// the group may still be running, so the call fails and the record names it.
+func TestFailedGroupKillFailsTheCall(t *testing.T) {
+	r := newRegistry(t)
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	old := killGroup
+	killGroup = func(*exec.Cmd) (bool, error) { return false, errors.New("operation not permitted") }
+	t.Cleanup(func() { killGroup = old })
+	_, err := run(t, r, "ls")
+	wantErr(t, err, "kill process group")
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	exit, ok := led.events[0].data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", led.events[0].data)
+	}
+	if exit.Refused != "kill-failed" {
+		t.Fatalf("recorded refused %q, want %q", exit.Refused, "kill-failed")
+	}
+	if exit.Orphans {
+		t.Fatal("record claims the kill reached a group that it did not")
 	}
 }
 
