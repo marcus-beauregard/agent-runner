@@ -6,12 +6,14 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/marcus-beauregard/agent-runner/internal/agent"
+	"github.com/marcus-beauregard/agent-runner/internal/audit"
 	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
@@ -286,6 +288,127 @@ func TestCleanRunHasNoDrift(t *testing.T) {
 	if !strings.Contains(out, "\"done\": true") {
 		t.Errorf("clean run did not report a finished result:\n%s", out)
 	}
+}
+
+// gitRepo makes a directory a real repository, so the tests ask repoRoot the
+// question a run asks instead of assuming the answer.
+func gitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--quiet", dir).CombinedOutput(); err != nil {
+		t.Skipf("git init: %v: %s", err, out)
+	}
+	return dir
+}
+
+// TestSnapshotWatchesTheRepositoryAroundTheRun is the first half of the blocker
+// on #90: with the run directory inside the checkout, the checkout is in the
+// snapshot, so a write beside the run directory is drift and a write inside it
+// is not.
+func TestSnapshotWatchesTheRepositoryAroundTheRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+	runDir := filepath.Join(repo, "work")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+
+	before, err := snapshotHost(runDir)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if _, ok := before[repo]; !ok {
+		t.Fatalf("the checkout %s is not watched (%d roots in the snapshot)", repo, len(before))
+	}
+
+	if err := os.WriteFile(filepath.Join(runDir, "scratch.txt"), []byte("mine\n"), 0o600); err != nil {
+		t.Fatalf("write in the run directory: %v", err)
+	}
+	stray := filepath.Join(repo, "stray.txt")
+	if err := os.WriteFile(stray, []byte("not mine\n"), 0o600); err != nil {
+		t.Fatalf("write beside the run directory: %v", err)
+	}
+	after, err := snapshotHost(runDir)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	seen := make(map[string]bool, len(audit.Compare(before, after)))
+	for _, d := range audit.Compare(before, after) {
+		seen[d.Path] = true
+	}
+	if !seen[stray] {
+		t.Errorf("drift did not name %s: %v", stray, seen)
+	}
+	for path := range seen {
+		if path == runDir || strings.HasPrefix(path, runDir+string(filepath.Separator)) {
+			t.Errorf("the run's own write under %s was reported as drift: %v", runDir, seen)
+		}
+	}
+}
+
+// TestSnapshotAtTheRepositoryRootClaimsNoRepositoryWatch is the second half: at
+// the checkout root the whole tree is the run's to write, so no repository root
+// is claimed — and a write in it is not drift. The alternative reading, that the
+// checkout is watched and every write in it is an escape, would refuse the
+// ordinary way to run the command.
+func TestSnapshotAtTheRepositoryRootClaimsNoRepositoryWatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+
+	before, err := snapshotHost(repo)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if len(before) == 0 {
+		t.Fatal("the audit watched nothing at all")
+	}
+	for path := range before {
+		if path == repo || strings.HasPrefix(path, repo+string(filepath.Separator)) {
+			t.Errorf("the checkout is in the snapshot as %s, but it is the run directory", path)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "written-by-the-run.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("write in the run directory: %v", err)
+	}
+	after, err := snapshotHost(repo)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if drift := audit.Compare(before, after); len(drift) != 0 {
+		t.Errorf("a write in the run directory was drift: %v", drift)
+	}
+}
+
+// TestRepoRootTellsAbsenceFromFailure pins the distinction the review asked for:
+// git answering "not a repository" leaves nothing to watch, while git failing to
+// answer is a watch that was never established and has to stop the run rather
+// than report it clean.
+func TestRepoRootTellsAbsenceFromFailure(t *testing.T) {
+	t.Run("not a repository", func(t *testing.T) {
+		stubPATH(t, map[string]string{"git": "#!/bin/sh\nprintf '%s\\n' 'fatal: not a git repository (or any of the parent directories): .git' >&2\nexit 128\n"})
+		root, err := repoRoot(t.TempDir())
+		if err != nil {
+			t.Fatalf("repoRoot: %v", err)
+		}
+		if root != "" {
+			t.Errorf("repoRoot = %q, want empty", root)
+		}
+	})
+	t.Run("git failed", func(t *testing.T) {
+		stubPATH(t, map[string]string{"git": "#!/bin/sh\nprintf '%s\\n' 'fatal: cannot read config' >&2\nexit 1\n"})
+		if _, err := repoRoot(t.TempDir()); err == nil {
+			t.Fatal("a failed git lookup read as \"no repository\"")
+		}
+	})
+	t.Run("git is missing", func(t *testing.T) {
+		stubPATH(t, map[string]string{})
+		if _, err := repoRoot(t.TempDir()); err == nil {
+			t.Fatal("a missing git read as \"no repository\"")
+		}
+	})
 }
 
 // TestReportCommand is the CLI half of the report: a recorded run prints the

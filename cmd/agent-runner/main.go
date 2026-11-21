@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -124,9 +125,17 @@ func runAudited(ctx context.Context, wd, task string, llm agent.LLM, toolset age
 }
 
 // snapshotHost records every place a run must leave alone. runDir is the run's
-// working directory, excluded together with everything under it; repo is the
-// checkout it belongs to, passed to the watchlist so the one repository path
-// the audit excuses is the .git/worktrees bookkeeping that `git worktree add` writes.
+// working directory, excluded together with everything under it. repo is the
+// checkout around runDir, watched from its root so a write beside the run
+// directory is caught, and passed to the watchlist so the one repository path
+// the audit excuses is the .git/worktrees bookkeeping that `git worktree add`
+// writes.
+//
+// When runDir is the checkout root itself the two are the same path and there
+// is no repository path outside the run: "outside the run directory" would have
+// nothing in the checkout to mean, so the repository adds no root of its own.
+// That is a narrowing of the claim, not a silent exclusion — the audit never
+// says it watched a repository when the whole of it was the run's to write.
 func snapshotHost(runDir string) (audit.Snapshot, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -136,7 +145,13 @@ func snapshotHost(runDir string) (audit.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	repo := repoRoot(runDir)
+	repo, err := repoRoot(runDir)
+	if err != nil {
+		return nil, err
+	}
+	if repo != "" && sameDir(repo, runDir) {
+		repo = ""
+	}
 	snap, err := audit.Take(audit.Watchlist(home, repo), audit.Ignores(home, stateBase, runDir, repo))
 	if err != nil {
 		return nil, err
@@ -151,15 +166,50 @@ func snapshotHost(runDir string) (audit.Snapshot, error) {
 	return snap, nil
 }
 
-// repoRoot is the checkout dir belongs to, or "" when it is not inside one.
-// A run outside a repository has no parent bookkeeping to watch, and git
-// failing to answer is that case rather than an error worth stopping for.
-func repoRoot(dir string) string {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+// sameDir reports whether two paths name the same directory. git prints the
+// physical path, which can differ from the one os.Getwd returns through a
+// symlink; comparing the strings would then watch a repository that the run
+// has already excluded under its other name.
+func sameDir(a, b string) bool {
+	ai, err := os.Stat(a)
 	if err != nil {
-		return ""
+		return filepath.Clean(a) == filepath.Clean(b)
 	}
-	return strings.TrimSpace(string(out))
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
+// repoRoot is the checkout dir belongs to, or "" when it is not inside one.
+// The two answers stay apart: "there is no repository" means there is nothing
+// to watch, while git failing to answer means the watch was never established —
+// and a run that reports clean over that is #85 in a new coat.
+func repoRoot(dir string) (string, error) {
+	var stderr strings.Builder
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err == nil {
+		root := strings.TrimSpace(string(out))
+		if root == "" {
+			return "", fmt.Errorf("git rev-parse --show-toplevel in %s printed nothing", dir)
+		}
+		return root, nil
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return "", fmt.Errorf("run git rev-parse in %s: %w", dir, err)
+	}
+	// git's answer for "not inside a work tree" is fatal, exit 128. Any other
+	// failure — a broken config, a missing object, a filesystem that refused —
+	// is not that answer and must not read as one.
+	msg := strings.TrimSpace(stderr.String())
+	if exit.ExitCode() == 128 && strings.Contains(msg, "not a git repository") {
+		return "", nil
+	}
+	return "", fmt.Errorf("git rev-parse --show-toplevel in %s: %v: %s", dir, err, msg)
 }
 
 // refuseDrift prints one line per drifted path and returns the refusal naming
