@@ -24,12 +24,12 @@ That is the product: a closed, deterministic path with exactly one place a decis
 | Mark bounds | 47% of the width, 32% of the height |
 | Centring | dx +5px, dy 0 |
 | Symmetry | ink splits 51 / 49 left to right |
-| At 32px | 79 of 1024 pixels carry ink — it survives the smallest size we care about |
+| Slit height | 28px at 1024, i.e. 2.7% of the frame — the number the minimum size is derived from |
 
 ## Clear space and size
 
 - **Clear space:** the height of the dot on all four sides. Nothing enters it — no text, no border, no screenshot edge.
-- **Minimum size:** 32px. Below that the gap closes and the mark becomes a rectangle.
+- **Minimum size: 64px.** The gap is two slits of 28px in a 1024 frame, so at any rendered width they are `0.027 × width` pixels: 0.9px at 32, 1.4px at 52, 1.75px at 64. Below roughly 56px they stop resolving and the mark reads as a plain rounded rectangle — which is a different logo. 64px is the first size where the thing the mark is *about* is still visible.
 - **Alignment:** centred in its own frame. Do not re-crop tighter; the margin is part of the design.
 - **Generous margins on every surface.** The mark earns attention by having room, not by being large.
 
@@ -84,7 +84,7 @@ The brand is the prose as much as the mark. Short, specific, unexcited.
 | Where | How |
 |---|---|
 | README header | mark at 96px, wordmark beside it, vertically centred. One row, no tagline underneath |
-| Favicon | 32px and 64px from `logo-512.png`; check the gap still reads at 32 |
+| Favicon | 64px from `logo-512.png`. At 32px the gap is sub-pixel and the mark becomes a rounded rectangle — use 64, or accept the silhouette knowingly |
 | Social preview | mark centred on `#111111` at 1280×640, nothing else |
 | Docs | once at the top of the README is the whole budget. Not every page |
 | Terminal banner | don't. The CLI prints its version and usage, not ASCII art |
@@ -100,7 +100,9 @@ The brand is the prose as much as the mark. Short, specific, unexcited.
 
 ## Regenerating
 
-The mark and the poster came out of Gemini from a written brief — a rectangular loop, one gap, a dot in it, flat white on flat dark, legible at 32px, nothing else in frame. If either is regenerated, hold it to the measurements at the top of this file: square, four identical corners, mark inside 50% of the frame, centred, gap still visible at 32px. Those are the checks an image model fails silently — the first generation came back 1408×768 with four different corner colours and was thrown away.
+The mark and the poster came out of Gemini from a written brief — a rectangular loop, one gap, a dot in it, flat white on flat dark, nothing else in frame. If either is regenerated, hold it to the measurements at the top of this file: square, four identical corners, mark inside 50% of the frame, centred, and a slit height of at least 2.7% so the gap survives to 64px. Those are the checks an image model fails silently — the first generation came back 1408×768 with four different corner colours and was thrown away.
+
+One correction worth keeping visible: an earlier version of this file claimed a 32px minimum and offered ink coverage as the proof. Ink coverage does not test the gap — at 32px the mark was measured as 79 lit pixels *and* a plain rounded rectangle, because the slits were 0.875px. Counting ink is not the same test as seeing the hole, and it is the hole the rules are built on.
 
 ---
 
