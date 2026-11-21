@@ -2,12 +2,19 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 )
+
+// A run's ledger is what the registry is handed in production; keep the
+// interface honest.
+var _ Ledger = (*runrec.Ledger)(nil)
 
 // newRegistry builds a Registry rooted in a fresh temp directory with the
 // fixtures the ported tests expect.
@@ -255,6 +262,108 @@ func TestReadFileRefusesSymlinkEscape(t *testing.T) {
 	}
 	_, err = r.Run(context.Background(), "read_file", map[string]any{"path": "link.txt"})
 	wantErr(t, err, "path escapes the working directory")
+}
+
+// testEvent is one event a Registry appended during a test.
+type testEvent struct {
+	kind  string
+	stage string
+	data  any
+}
+
+// fakeLedger stands in for a run ledger.
+type fakeLedger struct {
+	events []testEvent
+	err    error
+}
+
+func (f *fakeLedger) Append(kind, stage string, data any) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.events = append(f.events, testEvent{kind: kind, stage: stage, data: data})
+	return nil
+}
+
+func TestRecordsCommandExit(t *testing.T) {
+	r := newRegistry(t)
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	if _, err := run(t, r, "ls -1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	e := led.events[0]
+	if e.kind != kindCommandExit || e.stage != "" {
+		t.Fatalf("event = %q in stage %q, want %q in no stage", e.kind, e.stage, kindCommandExit)
+	}
+	exit, ok := e.data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", e.data)
+	}
+	if exit.Name != "ls" {
+		t.Fatalf("name %q, want %q", exit.Name, "ls")
+	}
+	if got := strings.Join(exit.Argv, " "); got != "ls -1" {
+		t.Fatalf("argv %q, want %q", got, "ls -1")
+	}
+	if exit.ExitCode != 0 || exit.Killed != "" {
+		t.Fatalf("exit = code %d, killed %q; want 0 and no kill", exit.ExitCode, exit.Killed)
+	}
+	if exit.DurationMS < 0 {
+		t.Fatalf("duration %d ms, want non-negative", exit.DurationMS)
+	}
+}
+
+// A refused command must not be recorded as a clean exit: the process can
+// exit 0 while its output is thrown away, which is exactly what the ledger has
+// to say out loud.
+func TestRefusedOutputIsRecorded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), make([]byte, 2*1024*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	if _, err := r.Run(context.Background(), toolRunCommand, map[string]any{"command": "cat big.txt"}); err == nil {
+		t.Fatal("command over the output cap returned a nil error")
+	}
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	exit, ok := led.events[0].data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", led.events[0].data)
+	}
+	if exit.Refused != "output-limit" {
+		t.Fatalf("recorded refused %q, want %q", exit.Refused, "output-limit")
+	}
+	if exit.ExitCode != 0 {
+		t.Fatalf("recorded exit code %d, want the process's own 0", exit.ExitCode)
+	}
+}
+
+// A ledger that fails while the command also fails must report both, not drop
+// the record error on the floor.
+func TestRecordFailureSurvivesCommandFailure(t *testing.T) {
+	r := newRegistry(t)
+	r.SetLedger(&fakeLedger{err: errors.New("disk full")})
+	_, err := run(t, r, "cat missing-file")
+	wantErr(t, err, "record cmd:exit: disk full")
+	wantErr(t, err, "command failed")
+}
+
+func TestRecordFailureFailsTheCommand(t *testing.T) {
+	r := newRegistry(t)
+	r.SetLedger(&fakeLedger{err: errors.New("disk full")})
+	_, err := run(t, r, "ls -1")
+	wantErr(t, err, "record cmd:exit: disk full")
 }
 
 func TestReadFileRefusesLarge(t *testing.T) {
