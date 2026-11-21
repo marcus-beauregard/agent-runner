@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/marcus-beauregard/agent-runner/internal/policy"
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	"github.com/marcus-beauregard/agent-runner/internal/sandbox"
 )
 
@@ -119,6 +120,10 @@ type Isolation struct {
 	RunDir string
 }
 
+// namespaceProbeTimeout bounds the one bwrap run that proves the namespace can
+// be built with this run's mounts.
+const namespaceProbeTimeout = 10 * time.Second
+
 // SetIsolation puts every later command inside the isolation it names. A
 // worktree run — and the zero Isolation — runs on the host unchanged, because
 // that is what the weaker mode is. Container mode prepends bubblewrap and the
@@ -142,13 +147,37 @@ func (r *Registry) SetIsolation(iso Isolation) error {
 	}
 	args, err := sandbox.ArgsWithWorktree(r.root, iso.RunDir, sandbox.Config{})
 	if err != nil {
-		return err
+		// The mounts are the claim, so a source that will not bind is a
+		// refusal with its own words — not a plain error that the record
+		// would have to drop for want of a code.
+		return refuse.New(refuse.SandboxUnavailable, "sandbox",
+			fmt.Sprintf("container mounts: %v", err))
 	}
 	bin, err := exec.LookPath("bwrap")
 	if err != nil {
-		return refuse("container sandbox unavailable: %v", err)
+		return refuse.New(refuse.SandboxUnavailable, "sandbox",
+			fmt.Sprintf("container sandbox unavailable: %v", err))
 	}
-	r.isolation = append([]string{bin}, args...)
+	prefix := append([]string{bin}, args...)
+	// Detect proves bwrap can build a namespace; it cannot prove it can build
+	// this one. Running the exact argv once with a command that does nothing
+	// turns a mount or namespace failure into a refusal before the first
+	// command, instead of a command that failed for a reason the record reads
+	// as the model's own work.
+	ctx, cancel := context.WithTimeout(context.Background(), namespaceProbeTimeout)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, bin, append(append([]string{}, args...), "true")...).CombinedOutput(); err != nil {
+		reason := strings.TrimSpace(string(out))
+		if reason == "" {
+			reason = err.Error()
+		}
+		if i := strings.IndexByte(reason, '\n'); i >= 0 {
+			reason = reason[:i]
+		}
+		return refuse.New(refuse.SandboxUnavailable, "sandbox",
+			fmt.Sprintf("container sandbox unavailable: %s", reason))
+	}
+	r.isolation = prefix
 	return nil
 }
 

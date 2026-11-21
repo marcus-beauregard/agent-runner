@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
 	"github.com/marcus-beauregard/agent-runner/internal/sandbox"
 )
@@ -154,5 +155,44 @@ func TestContainerPrefixCarriesTheMounts(t *testing.T) {
 	}
 	if !slices.Equal(exit.Argv, []string{"ls", "-1"}) {
 		t.Errorf("recorded argv %q, want the raw command", exit.Argv)
+	}
+}
+
+// TestContainerNamespaceThatWillNotBuildIsARefusal is the hole Detect cannot
+// see: bwrap is installed and its own probe succeeds, but this run's mounts are
+// the ones that fail. The refusal is decided before the first command and it
+// carries a code, so the record says sandbox-unavailable instead of showing a
+// command that failed and a run that still calls itself container.
+func TestContainerNamespaceThatWillNotBuildIsARefusal(t *testing.T) {
+	root, runDir := containerRoots(t)
+	binDir := t.TempDir()
+	// Detect's probe is the only bwrap call that does not carry --unshare-all;
+	// the full argv does, and this stub refuses that one.
+	stub := "#!/bin/sh\ncase \"$*\" in\n*--unshare-all*)\techo 'bwrap: setting up uid map: Permission denied' >&2; exit 1;;\nesac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bwrap"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	r, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = r.SetIsolation(Isolation{Mode: sandbox.Container, RunDir: runDir})
+	if err == nil {
+		t.Fatal("SetIsolation accepted a namespace that bwrap refuses to build")
+	}
+	if !errors.Is(err, report.ErrRefused) || report.ExitCode(err) != 3 {
+		t.Fatalf("error = %v, want a refusal at exit 3", err)
+	}
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		t.Fatalf("error = %T, want a typed refusal the record can hold", err)
+	}
+	if ref.Code != refuse.SandboxUnavailable {
+		t.Errorf("code = %q, want %q", ref.Code, refuse.SandboxUnavailable)
+	}
+	if !strings.Contains(ref.Reason, "Permission denied") {
+		t.Errorf("reason = %q, want bwrap's own words", ref.Reason)
 	}
 }

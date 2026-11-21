@@ -881,3 +881,35 @@ func TestRunFlagsAfterTheTask(t *testing.T) {
 		t.Errorf("subject = %q, want the task alone", rec.Subject)
 	}
 }
+
+// TestRunRecordsARefusedNamespace is the record side of the hole Detect cannot
+// see: bwrap answers its own probe and then refuses this run's mounts. The run
+// is refused at exit 3 with a code in run.json, not recorded as a container run
+// whose only command happened to fail.
+func TestRunRecordsARefusedNamespace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inDir(t, t.TempDir())
+	stubPATH(t, map[string]string{
+		"git":   gitAbsent,
+		"bwrap": "#!/bin/sh\ncase \"$*\" in\n*--unshare-all*)\techo 'bwrap: setting up uid map: Permission denied' >&2; exit 1;;\nesac\nexit 0\n",
+		"ls":    "#!/bin/sh\necho inside\n",
+	})
+	base := t.TempDir()
+	if code := run([]string{"run", "list the files", "--sandbox", "container", "--run-dir", base}); code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.State != "refused" {
+		t.Errorf("state = %q, want refused", rec.State)
+	}
+	if rec.Refusal == nil {
+		t.Fatal("no refusal recorded: the record says container and nothing else")
+	}
+	if rec.Refusal.Code != "sandbox-unavailable" {
+		t.Errorf("refusal code = %q, want sandbox-unavailable", rec.Refusal.Code)
+	}
+	if !strings.Contains(rec.Refusal.Reason, "Permission denied") {
+		t.Errorf("refusal reason = %q, want bwrap's own words", rec.Refusal.Reason)
+	}
+}
