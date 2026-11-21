@@ -427,6 +427,18 @@ func TestArgsRefusesAGitDirItCannotTrust(t *testing.T) {
 			body: func(dir string) string { return "gitdir: " + filepath.Join(dir, "common", "elsewhere") },
 		},
 		{
+			name: "gitdir has no commondir",
+			setup: func(t *testing.T, dir string) {
+				// Shaped like a repository's own .git: a HEAD and objects are
+				// exactly what the HEAD/objects checks accept, so only the
+				// missing commondir tells it apart from a linked worktree.
+				common := filepath.Join(dir, "common")
+				mkdirAll(t, filepath.Join(common, "objects"))
+				writeTestFile(t, filepath.Join(common, "HEAD"), "ref: refs/heads/main\n")
+			},
+			body: func(dir string) string { return "gitdir: " + filepath.Join(dir, "common") },
+		},
+		{
 			name: "common dir has no HEAD",
 			setup: func(t *testing.T, dir string) {
 				common := filepath.Join(dir, "common")

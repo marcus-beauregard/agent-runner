@@ -174,9 +174,10 @@ func mount(root, configured, name string) (string, error) {
 // report a repository it does not have.
 //
 // The shape is checked rather than trusted, because the .git file is inside
-// the worktree a previous run wrote to. Only <common>/worktrees/<name>, with a
-// HEAD and an objects directory above it, is mounted — so a crafted file naming
-// /root/.ssh is refused instead of read into the cage.
+// the worktree a previous run wrote to. A .git file must name a linked
+// worktree: <common>/worktrees/<name> with a commondir, a HEAD file and an
+// objects directory above it. Anything else is refused, so a crafted file
+// naming /root/.ssh — or another repository's .git — never reaches the mount.
 func gitMount(worktree string) (string, error) {
 	path := filepath.Join(worktree, ".git")
 	info, err := os.Lstat(path)
@@ -208,20 +209,26 @@ func gitMount(worktree string) (string, error) {
 		return "", refuse("sandbox: worktree gitdir %s: %v", dir, err)
 	}
 
-	// A linked worktree usually keeps its own directory under the common one
-	// and records that in commondir; without the entry the gitdir is the common
-	// directory itself.
-	common := gitDir
-	if body, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
-		rel := strings.TrimSpace(string(body))
-		if rel != "" {
-			if !filepath.IsAbs(rel) {
-				rel = filepath.Join(gitDir, rel)
-			}
-			if common, err = resolveDir(rel); err != nil {
-				return "", refuse("sandbox: worktree commondir %s: %v", rel, err)
-			}
-		}
+	// A linked worktree keeps its own directory under the common one and records
+	// that in commondir. The entry is required: without it the check below would
+	// have nothing to compare against, and any host directory that happens to
+	// hold a HEAD and an objects dir would pass as the common dir of a worktree.
+	// A plain clone needs no mount because its .git is a directory, already
+	// inside /work.
+	commonBody, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return "", refuse("sandbox: worktree gitdir %s has no commondir", gitDir)
+	}
+	commonRel := strings.TrimSpace(string(commonBody))
+	if commonRel == "" {
+		return "", refuse("sandbox: worktree gitdir %s has an empty commondir", gitDir)
+	}
+	if !filepath.IsAbs(commonRel) {
+		commonRel = filepath.Join(gitDir, commonRel)
+	}
+	common, err := resolveDir(commonRel)
+	if err != nil {
+		return "", refuse("sandbox: worktree commondir %s: %v", commonRel, err)
 	}
 
 	rel, err := filepath.Rel(common, gitDir)
@@ -229,7 +236,7 @@ func gitMount(worktree string) (string, error) {
 		return "", refuse("sandbox: worktree gitdir %s is outside %s", gitDir, common)
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	if common != gitDir && (len(parts) != 2 || parts[0] != "worktrees") {
+	if len(parts) != 2 || parts[0] != "worktrees" {
 		return "", refuse("sandbox: worktree gitdir %s is not under %s/worktrees", gitDir, common)
 	}
 	if info, err := os.Stat(filepath.Join(common, "HEAD")); err != nil || info.IsDir() {
