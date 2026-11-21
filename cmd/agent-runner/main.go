@@ -214,7 +214,8 @@ func reportRun(args []string) int {
 //
 // A record that no longer agrees with its own world exits 1: the run did not
 // do what its record says, and that is a failure of the record, not a refusal
-// or a gate.
+// or a gate. A run that has not finished has no verdict to give and exits 1 with
+// an error instead: its ledger is partial because it is still going.
 func replayRun(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "agent-runner: replay: exactly one run directory is required")
@@ -253,7 +254,9 @@ Usage:
   agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>] --dry-run
                                                                  plan the work, writing nothing but the run record
   agent-runner report <id> [--run-dir <dir>]                     print REPORT.md for a recorded run
-  agent-runner replay <run-dir>                                  prove a recorded run's action set from its own record
+  agent-runner replay <run-dir>                                  prove a finished run's action set from its record
+                                                                 (needs a World snapshot and an account: a record written by
+                                                                 Begin, not one from work --run-dir)
   agent-runner --help                                            show this help
   agent-runner --version                                         print the version
 `)

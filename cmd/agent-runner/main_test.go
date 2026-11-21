@@ -183,14 +183,18 @@ func TestReplayCommand(t *testing.T) {
 		Comments: []world.Comment{{ID: 100, Author: "someone"}},
 	}
 	tests := []struct {
-		name     string
-		account  string
-		spend    bool
-		wantCode int
+		name       string
+		account    string
+		spend      bool
+		unfinished bool
+		wantCode   int
 	}{
 		{name: "matching record", account: "marcus-beauregard", spend: true, wantCode: 0},
 		{name: "record disagrees", account: "marcus-beauregard", wantCode: 1},
 		{name: "no account recorded", wantCode: 1},
+		// A live run has spent only part of its plan. Replay cannot call that a
+		// mismatch, and it cannot pass it either: no verdict, exit 1.
+		{name: "unfinished record", account: "marcus-beauregard", spend: true, unfinished: true, wantCode: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,6 +215,11 @@ func TestReplayCommand(t *testing.T) {
 				}
 				if err := l.Close(); err != nil {
 					t.Fatalf("close ledger: %v", err)
+				}
+			}
+			if !tc.unfinished {
+				if err := r.Finish(0); err != nil {
+					t.Fatalf("finish run: %v", err)
 				}
 			}
 			if code := run([]string{"replay", r.Dir}); code != tc.wantCode {

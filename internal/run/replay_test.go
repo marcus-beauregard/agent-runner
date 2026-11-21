@@ -36,9 +36,19 @@ func openWorld() world.World {
 	}
 }
 
-// fixtureRun creates the record replay reads: a run directory, a World snapshot,
-// and the account the run acted as.
-func fixtureRun(t *testing.T, snapshot world.World) *Run {
+// openWorldWithACheck owes two actions: the comment to answer and the failing
+// check to fix. Two is the smallest plan that can be partly spent, which is what
+// separates a run that stopped short from a record that is wrong.
+func openWorldWithACheck() world.World {
+	w := openWorld()
+	w.Checks = []world.Check{{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"}}
+	return w
+}
+
+// newFixtureRun creates the record replay reads: a run directory, a World
+// snapshot, and the account the run acted as. The record is left running, as New
+// writes it; callers finish it with the outcome their case is about.
+func newFixtureRun(t *testing.T, snapshot world.World) *Run {
 	t.Helper()
 	r, err := New(t.TempDir(), Meta{Kind: "resolve", Subject: snapshot.Subject, Account: "marcus-beauregard"})
 	if err != nil {
@@ -46,6 +56,17 @@ func fixtureRun(t *testing.T, snapshot world.World) *Run {
 	}
 	if err := SaveWorld(r.Dir, snapshot); err != nil {
 		t.Fatalf("save world: %v", err)
+	}
+	return r
+}
+
+// fixtureRun is newFixtureRun finished done, the state in which a run owes its
+// record the whole plan.
+func fixtureRun(t *testing.T, snapshot world.World) *Run {
+	t.Helper()
+	r := newFixtureRun(t, snapshot)
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("finish run: %v", err)
 	}
 	return r
 }
@@ -71,6 +92,7 @@ func TestReplay(t *testing.T) {
 		name     string
 		snapshot world.World
 		spends   [][2]string
+		finish   int // exit code Finish records; 0 is done
 		wantOK   bool
 		wantOut  []string
 	}{
@@ -95,6 +117,37 @@ func TestReplay(t *testing.T) {
 			wantOut:  []string{"replay: differs", "extra (1):", "  comment:55", "missing (0):"},
 		},
 		{
+			// The plan had two actions and the run did one of them. On a done
+			// record that is a mismatch: the record claims an outcome it did not
+			// reach.
+			name:     "a finished run that left a planned action unspent differs",
+			snapshot: openWorldWithACheck(),
+			spends:   [][2]string{{"comment:100", "answered #100"}},
+			wantOK:   false,
+			wantOut:  []string{"replay: differs", "missing (1):", "  check:build:failure", "recorded (1):"},
+		},
+		{
+			// The same partial spend, on a run that stopped for a person. It did
+			// what it could and said so; there is nothing for replay to catch.
+			name:     "a run that stopped for a person is not a mismatch",
+			snapshot: openWorldWithACheck(),
+			spends:   [][2]string{{"comment:100", "answered #100"}},
+			finish:   4,
+			wantOK:   true,
+			wantOut:  []string{"replay: ok (state needs_human, 1 planned action(s) unspent)", "missing (1):"},
+		},
+		{
+			// Stopping early excuses what was not done, never what was invented:
+			// a spend the World never asked for is a broken record whatever the
+			// run's state.
+			name:     "a stopped run still cannot spend what its world never asked for",
+			snapshot: openWorldWithACheck(),
+			spends:   [][2]string{{"comment:100", "answered #100"}, {"comment:55", "answered #55"}},
+			finish:   4,
+			wantOK:   false,
+			wantOut:  []string{"replay: differs", "extra (1):", "  comment:55"},
+		},
+		{
 			name:     "a world that owes nothing replays to an empty set",
 			snapshot: world.World{Subject: "https://github.com/o/r/issues/7", Issue: world.Issue{Number: 7, State: "OPEN"}},
 			wantOK:   true,
@@ -103,9 +156,12 @@ func TestReplay(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			r := fixtureRun(t, tt.snapshot)
+			r := newFixtureRun(t, tt.snapshot)
 			for _, s := range tt.spends {
 				spend(t, r, s[0], s[1])
+			}
+			if err := r.Finish(tt.finish); err != nil {
+				t.Fatalf("finish run: %v", err)
 			}
 			var buf bytes.Buffer
 			ok, err := Replay(r.Dir, &buf)
@@ -121,6 +177,21 @@ func TestReplay(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestReplayRefusesAnUnfinishedRun pins the difference between a partial ledger
+// and a wrong one: a live run spent what it reached, so replay has no verdict to
+// give and must not print one.
+func TestReplayRefusesAnUnfinishedRun(t *testing.T) {
+	r := newFixtureRun(t, openWorld())
+	spend(t, r, "comment:100", "answered #100")
+	var buf bytes.Buffer
+	if _, err := Replay(r.Dir, &buf); !errors.Is(err, ErrUnfinished) {
+		t.Fatalf("Replay = %v, want ErrUnfinished", err)
+	}
+	if strings.Contains(buf.String(), "replay: ok") {
+		t.Errorf("replay gave a verdict on a running record:\n%s", buf.String())
 	}
 }
 
@@ -256,6 +327,9 @@ func TestBeginRecordsTheAccount(t *testing.T) {
 		t.Errorf("run.json does not record the account:\n%s", b)
 	}
 	spend(t, start.Run, "comment:100", "answered #100")
+	if err := start.Run.Finish(0); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
 	if ok, err := Replay(start.Run.Dir, io.Discard); err != nil || !ok {
 		t.Fatalf("Replay = %v, %v; want a matching record", ok, err)
 	}

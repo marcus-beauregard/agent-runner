@@ -19,20 +19,34 @@ import (
 // rather than replayed approximately.
 var ErrNoAccount = errors.New("run record names no account")
 
+// ErrUnfinished reports a record whose run has not reached a terminal state.
+//
+// A running record has spent the part of its plan it reached so far, which is
+// not the whole plan and is not a lie: the run is simply still going. Only a
+// finished record can be judged, so replay refuses to give a verdict on one
+// that is not finished rather than calling a live run's partial ledger a
+// mismatch.
+var ErrUnfinished = errors.New("run has not finished")
+
 // Replay recomputes the plan a recorded run decided on and compares it with the
 // plan the ledger holds. It reads run.json, world.json and run.ndjson, and
 // writes nothing: no run directory mutation, no network, no model call, so it is
 // safe on a live run's directory as well as a finished one (PRD §8).
 //
-// ok is true only when the two action sets are equal. The diff is printed to w
-// either way — what was recomputed, what was recorded, and which actions are
-// missing from or extra to the record — because "differs" without the difference
-// is not a proof of anything.
+// ok is true only when the record and the World cannot contradict each other.
+// What that means depends on how the run ended, which the record says: a run
+// that finished done spent its whole plan, so a planned action it never spent is
+// a mismatch; a run that stopped at needs_human, refused or failed spent only
+// what it got to, so unspent actions are expected and only an action the World
+// never asked for is a mismatch. The diff is printed to w either way — what was
+// recomputed, what was recorded, and which actions are missing from or extra to
+// the record — because "differs" without the difference is not a proof of
+// anything.
 //
-// A torn ledger, a World that cannot be read, or a run that does not name its
-// account is an error, not a mismatch: replay can no longer see what the run
-// saw, and reporting that as ok would prove the record right by ignoring the
-// part of it that is damaged.
+// A torn ledger, a World that cannot be read, a run that does not name its
+// account, or a run that has not finished is an error, not a mismatch: replay
+// can no longer see what the run saw, and reporting that as ok would prove the
+// record right by ignoring the part of it that is damaged.
 func Replay(runDir string, w io.Writer) (bool, error) {
 	rec, err := loadRecord(runDir)
 	if err != nil {
@@ -40,6 +54,12 @@ func Replay(runDir string, w io.Writer) (bool, error) {
 	}
 	if rec.Account == "" {
 		return false, fmt.Errorf("%w: %s", ErrNoAccount, runDir)
+	}
+	// An unfinished record has spent only the part of its plan it reached, so
+	// its ledger is legitimately partial: that is what a live run looks like,
+	// not a damaged record. There is no verdict to give until it ends.
+	if rec.State == "" || rec.State == stateRunning {
+		return false, fmt.Errorf("%w: %s", ErrUnfinished, runDir)
 	}
 	snapshot, err := LoadWorld(runDir)
 	if err != nil {
@@ -93,17 +113,25 @@ func Replay(runDir string, w io.Writer) (bool, error) {
 	writeSection(w, "recomputed", lines)
 	lines = lines[:0]
 	for _, a := range recorded {
-		lines = append(lines, a.TriggerID)
+		lines = append(lines, a.TriggerID+" "+a.Action)
 	}
 	writeSection(w, "recorded", lines)
 	writeSection(w, "missing", missing)
 	writeSection(w, "extra", extra)
-	if len(missing) == 0 && len(extra) == 0 {
-		fmt.Fprintln(w, "replay: ok")
+	if len(extra) > 0 || (rec.State == stateDone && len(missing) > 0) {
+		fmt.Fprintln(w, "replay: differs")
+		return false, nil
+	}
+	// A run that ended needs_human, refused or failed did not owe its record
+	// the rest of the plan: leaving an action unspent is how those states look.
+	// Spending one the World never asked for is still a mismatch, which the
+	// check above already answered.
+	if rec.State != stateDone {
+		fmt.Fprintf(w, "replay: ok (state %s, %d planned action(s) unspent)\n", rec.State, len(missing))
 		return true, nil
 	}
-	fmt.Fprintln(w, "replay: differs")
-	return false, nil
+	fmt.Fprintln(w, "replay: ok")
+	return true, nil
 }
 
 // writeSection prints one part of the diff: a heading with its count, then one
