@@ -2,12 +2,19 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 )
+
+// A run's ledger is what the registry is handed in production; keep the
+// interface honest.
+var _ Ledger = (*runrec.Ledger)(nil)
 
 // newRegistry builds a Registry rooted in a fresh temp directory with the
 // fixtures the ported tests expect.
@@ -255,6 +262,66 @@ func TestReadFileRefusesSymlinkEscape(t *testing.T) {
 	}
 	_, err = r.Run(context.Background(), "read_file", map[string]any{"path": "link.txt"})
 	wantErr(t, err, "path escapes the working directory")
+}
+
+// testEvent is one event a Registry appended during a test.
+type testEvent struct {
+	kind  string
+	stage string
+	data  any
+}
+
+// fakeLedger stands in for a run ledger.
+type fakeLedger struct {
+	events []testEvent
+	err    error
+}
+
+func (f *fakeLedger) Append(kind, stage string, data any) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.events = append(f.events, testEvent{kind: kind, stage: stage, data: data})
+	return nil
+}
+
+func TestRecordsCommandExit(t *testing.T) {
+	r := newRegistry(t)
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	if _, err := run(t, r, "ls -1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	e := led.events[0]
+	if e.kind != kindCommandExit || e.stage != "" {
+		t.Fatalf("event = %q in stage %q, want %q in no stage", e.kind, e.stage, kindCommandExit)
+	}
+	exit, ok := e.data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", e.data)
+	}
+	if exit.Name != "ls" {
+		t.Fatalf("name %q, want %q", exit.Name, "ls")
+	}
+	if got := strings.Join(exit.Argv, " "); got != "ls -1" {
+		t.Fatalf("argv %q, want %q", got, "ls -1")
+	}
+	if exit.ExitCode != 0 || exit.Killed != "" {
+		t.Fatalf("exit = code %d, killed %q; want 0 and no kill", exit.ExitCode, exit.Killed)
+	}
+	if exit.DurationMS < 0 {
+		t.Fatalf("duration %d ms, want non-negative", exit.DurationMS)
+	}
+}
+
+func TestRecordFailureFailsTheCommand(t *testing.T) {
+	r := newRegistry(t)
+	r.SetLedger(&fakeLedger{err: errors.New("disk full")})
+	_, err := run(t, r, "ls -1")
+	wantErr(t, err, "record cmd:exit: disk full")
 }
 
 func TestReadFileRefusesLarge(t *testing.T) {

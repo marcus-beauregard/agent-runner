@@ -20,8 +20,14 @@ import (
 )
 
 const (
-	// commandTimeout bounds a single run_command invocation.
-	commandTimeout = 10 * time.Second
+	// defaultCommandTimeout bounds a single command unless the caller
+	// overrides the tool's timeout.
+	defaultCommandTimeout = 10 * time.Minute
+	// toolRunCommand is the registry's command-running tool.
+	toolRunCommand = "run_command"
+	// kindCommandExit is the event one completed command leaves in the run
+	// ledger.
+	kindCommandExit = "cmd:exit"
 	// outputCap bounds stdout and stderr of a command, matching the JS maxBuffer.
 	outputCap = 1 << 20 // 1 MiB
 	// readFileCap is the largest file read_file will return.
@@ -33,11 +39,31 @@ const (
 // than silently treat it as part of a filename.
 const shellChars = ";&|<>$`*?()[]{}~!\\"
 
+// Ledger is the part of a run's event stream the registry writes to. It is
+// implemented by *run.Ledger; a Registry with no ledger records nothing.
+type Ledger interface {
+	Append(kind, stage string, data any) error
+}
+
+// commandExit is the payload of a cmd:exit event: the command's name, the argv
+// that was executed (never the environment), and how it ended. Killed names
+// why the group was killed — "timeout", "canceled", or a signal — and ExitCode
+// is -1 then, because a killed process has no exit status of its own.
+type commandExit struct {
+	Name       string   `json:"name"`
+	Argv       []string `json:"argv"`
+	DurationMS int64    `json:"duration_ms"`
+	ExitCode   int      `json:"exit_code"`
+	Killed     string   `json:"killed,omitempty"`
+}
+
 // Registry is a set of tools confined to a single working directory.
 type Registry struct {
-	root  string
-	names []string
-	tools map[string]func(context.Context, map[string]any) (string, error)
+	root     string
+	names    []string
+	tools    map[string]func(context.Context, map[string]any) (string, error)
+	ledger   Ledger
+	timeouts map[string]time.Duration
 }
 
 // New resolves root to an absolute, symlink-free path and returns a Registry
@@ -47,14 +73,36 @@ func New(root string) (*Registry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve working directory: %w", err)
 	}
-	r := &Registry{root: real}
-	r.names = []string{"read_file", "write_file", "run_command"}
+	r := &Registry{root: real, timeouts: make(map[string]time.Duration)}
+	r.names = []string{"read_file", "write_file", toolRunCommand}
 	r.tools = map[string]func(context.Context, map[string]any) (string, error){
-		"read_file":   r.readFile,
-		"write_file":  r.writeFile,
-		"run_command": r.runCommand,
+		"read_file":    r.readFile,
+		"write_file":   r.writeFile,
+		toolRunCommand: r.runCommand,
 	}
 	return r, nil
+}
+
+// SetLedger attaches the run's event stream, so every command appends one
+// cmd:exit event. A nil ledger, the default, records nothing.
+func (r *Registry) SetLedger(l Ledger) { r.ledger = l }
+
+// SetTimeout overrides the timeout for one tool. A non-positive duration
+// restores the default.
+func (r *Registry) SetTimeout(tool string, d time.Duration) {
+	if d <= 0 {
+		delete(r.timeouts, tool)
+		return
+	}
+	r.timeouts[tool] = d
+}
+
+// timeout returns the tool's timeout, or the default when none is set.
+func (r *Registry) timeout(tool string) time.Duration {
+	if d, ok := r.timeouts[tool]; ok {
+		return d
+	}
+	return defaultCommandTimeout
 }
 
 // Names returns the tool names in declared order, for prompts and parseAction.
@@ -323,14 +371,41 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	ctx, cancel := context.WithTimeout(ctx, r.timeout(toolRunCommand))
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = r.root
+	// A child that holds the output pipe open would otherwise keep Wait
+	// blocked after the command itself has exited. WaitDelay closes the pipe
+	// and lets the group kill below run.
+	cmd.WaitDelay = time.Second
+	setProcessGroup(cmd)
 	stdout, stderr := newCappedBuffer(), newCappedBuffer()
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	start := time.Now()
 	runErr := cmd.Run()
+	duration := time.Since(start)
+	// The command is over. Anything still in its group was left behind by it:
+	// a backgrounded child, or the whole group when the deadline fired.
+	killProcessGroup(cmd)
+	code, killed := exitStatus(cmd.ProcessState)
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		killed = "timeout"
+	case ctx.Err() != nil:
+		killed = "canceled"
+	}
+	if killed != "" {
+		code = -1
+	}
+	recordErr := r.record(commandExit{
+		Name:       argv[0],
+		Argv:       argv,
+		DurationMS: duration.Milliseconds(),
+		ExitCode:   code,
+		Killed:     killed,
+	})
 	if stdout.exceeded || stderr.exceeded {
 		return "", errors.New("command output exceeds 1 MiB limit")
 	}
@@ -338,9 +413,23 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", errors.New("command timed out")
 		}
+		if errors.Is(runErr, exec.ErrWaitDelay) {
+			return "", errors.New("command left a child holding its output; the process group was killed")
+		}
 		return "", fmt.Errorf("command failed: %w", runErr)
 	}
+	if recordErr != nil {
+		return "", fmt.Errorf("record %s: %w", kindCommandExit, recordErr)
+	}
 	return stdout.String(), nil
+}
+
+// record appends one event to the run ledger, if one is attached.
+func (r *Registry) record(exit commandExit) error {
+	if r.ledger == nil {
+		return nil
+	}
+	return r.ledger.Append(kindCommandExit, "", exit)
 }
 
 // cappedBuffer keeps at most outputCap bytes, flagging overflow so the caller
