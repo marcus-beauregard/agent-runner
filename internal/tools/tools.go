@@ -58,6 +58,10 @@ type commandExit struct {
 	ExitCode   int      `json:"exit_code"`
 	Killed     string   `json:"killed,omitempty"`
 	Refused    string   `json:"refused,omitempty"`
+	// Env names the environment policy the command ran under, never a value.
+	// "scrubbed" says the child got Env's allowlist; empty says it inherited,
+	// which is what a registry nobody configured still does.
+	Env string `json:"env,omitempty"`
 }
 
 // Registry is a set of tools confined to a single working directory.
@@ -67,6 +71,10 @@ type Registry struct {
 	tools    map[string]func(context.Context, map[string]any) (string, error)
 	ledger   Ledger
 	timeouts map[string]time.Duration
+	// env is the child environment from Env; nil means inherit. secrets are
+	// the values inside it that a recorded argv must not repeat.
+	env     []string
+	secrets []string
 }
 
 // New resolves root to an absolute, symlink-free path and returns a Registry
@@ -89,6 +97,14 @@ func New(root string) (*Registry, error) {
 // SetLedger attaches the run's event stream, so every command appends one
 // cmd:exit event. A nil ledger, the default, records nothing.
 func (r *Registry) SetLedger(l Ledger) { r.ledger = l }
+
+// SetEnv gives every command the environment built by Env. A nil slice
+// restores inheritance, which is the default; an empty non-nil slice is an
+// environment with nothing in it, so the two are not the same call.
+func (r *Registry) SetEnv(env []string) {
+	r.env = env
+	r.secrets = secretValues(env)
+}
 
 // SetTimeout overrides the timeout for one tool. A non-positive duration
 // restores the default.
@@ -378,6 +394,9 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = r.root
+	if r.env != nil {
+		cmd.Env = r.env
+	}
 	// A child that holds the output pipe open would otherwise keep Wait
 	// blocked after the command itself has exited. WaitDelay closes the pipe
 	// and lets the group kill below run.
@@ -418,14 +437,18 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	case runErr != nil:
 		outErr = fmt.Errorf("command failed: %w", runErr)
 	}
-	recordErr := r.record(commandExit{
+	entry := commandExit{
 		Name:       argv[0],
-		Argv:       argv,
+		Argv:       redactArgv(argv, r.secrets),
 		DurationMS: duration.Milliseconds(),
 		ExitCode:   code,
 		Killed:     killed,
 		Refused:    refused,
-	})
+	}
+	if r.env != nil {
+		entry.Env = scrubbedEnv
+	}
+	recordErr := r.record(entry)
 	if outErr != nil {
 		if recordErr != nil {
 			return "", fmt.Errorf("%w (record %s: %v)", outErr, kindCommandExit, recordErr)
