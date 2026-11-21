@@ -67,10 +67,10 @@ var secretNames = []string{"GH_TOKEN", "GITHUB_TOKEN"}
 // runs while being unable to do the job it was recorded as doing.
 func Env(runDir string, creds Credentials) ([]string, error) {
 	if runDir == "" {
-		return nil, refuse("env: no run directory")
+		return nil, refused("env: no run directory")
 	}
 	if creds.Name == "" || creds.Email == "" {
-		return nil, refuse("env: no git identity; a child that cannot commit is not a build run")
+		return nil, refused("env: no git identity; a child that cannot commit is not a build run")
 	}
 	abs, err := filepath.Abs(runDir)
 	if err != nil {
@@ -93,7 +93,7 @@ func Env(runDir string, creds Credentials) ([]string, error) {
 		}
 	}
 	if !hasName(env, "PATH") {
-		return nil, refuse("env: PATH is not set; a child with no search path cannot run")
+		return nil, refused("env: PATH is not set; a child with no search path cannot run")
 	}
 	// TMPDIR is the rule PRD §6.2 states: scratch space lands inside the run,
 	// so a tool that asks the system where to write gets an answer that gc can
@@ -151,14 +151,14 @@ func copyHosts(home string) error {
 	if dir == "" {
 		base, err := os.UserConfigDir()
 		if err != nil {
-			return refuse("env: no gh credential: %v", err)
+			return refused("env: no gh credential: %v", err)
 		}
 		dir = filepath.Join(base, "gh")
 	}
 	src := filepath.Join(dir, "hosts.yml")
 	data, err := os.ReadFile(src)
 	if errors.Is(err, os.ErrNotExist) {
-		return refuse("env: no gh credential: set GH_TOKEN or sign gh in (%s does not exist)", src)
+		return refused("env: no gh credential: set GH_TOKEN or sign gh in (%s does not exist)", src)
 	}
 	if err != nil {
 		return fmt.Errorf("env: read %s: %w", src, err)
@@ -218,6 +218,6 @@ func redactArgv(argv, secrets []string) []string {
 }
 
 // refuse wraps report.ErrRefused, the sentinel report.ExitCode maps to 3.
-func refuse(format string, args ...any) error {
+func refused(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", report.ErrRefused, fmt.Sprintf(format, args...))
 }

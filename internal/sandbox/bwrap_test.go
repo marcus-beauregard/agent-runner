@@ -475,3 +475,51 @@ func TestArgsRefusesAGitDirItCannotTrust(t *testing.T) {
 		})
 	}
 }
+
+// TestArgsWithWorktreeBindsTheDirectoryItWasGiven is the offline run's path:
+// /work is the directory the command runner is already confined to, even
+// though it is not the run's own child. tmp and home stay the run's, and a
+// worktree that cannot be resolved is a refusal rather than a container built
+// around nothing.
+func TestArgsWithWorktreeBindsTheDirectoryItWasGiven(t *testing.T) {
+	dir := containerLayout(t)
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve run directory: %v", err)
+	}
+	tree := t.TempDir()
+	treeReal, err := filepath.EvalSymlinks(tree)
+	if err != nil {
+		t.Fatalf("resolve worktree: %v", err)
+	}
+	got, err := ArgsWithWorktree(tree, dir, Config{})
+	if err != nil {
+		t.Fatalf("ArgsWithWorktree: %v", err)
+	}
+	joined := strings.Join(got, " ")
+	for _, want := range []string{
+		"--bind " + treeReal + " /work",
+		"--bind " + filepath.Join(real, "tmp") + " /tmp",
+		"--bind " + filepath.Join(real, "home") + " /home/agent",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv %q does not bind %q", joined, want)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		worktree string
+		cfg      Config
+	}{
+		{"no worktree", "", Config{}},
+		{"two worktrees", tree, Config{Worktree: tree}},
+		{"a worktree that is gone", filepath.Join(tree, "gone"), Config{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ArgsWithWorktree(tc.worktree, dir, tc.cfg)
+			if err == nil || !errors.Is(err, report.ErrRefused) {
+				t.Fatalf("error = %v, want a refusal", err)
+			}
+		})
+	}
+}

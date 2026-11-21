@@ -785,3 +785,158 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 		t.Errorf("report does not name the refusal:\n%s", out)
 	}
 }
+
+// gitAbsent is a git whose only answer is "there is no repository here": what a
+// run in a temp directory sees, and what snapshotHost reads as nothing to
+// watch rather than as a failed watch.
+const gitAbsent = "#!/bin/sh\necho 'fatal: not a git repository (or any of the parent directories): .git' >&2\nexit 128\n"
+
+// TestRunSandboxFlag is #95 at the binary: the mode the run got is the one the
+// record names, a host that cannot build the namespace refuses at exit 3 with
+// the reason in the record, and worktree mode still runs on the host.
+func TestRunSandboxFlag(t *testing.T) {
+	const (
+		bwrapUnavailable = "#!/bin/sh\nexit 1\n"
+		bwrapAvailable   = "#!/bin/sh\nexit 0\n"
+		lsStub           = "#!/bin/sh\necho inside\n"
+	)
+	tests := []struct {
+		name        string
+		mode        string
+		bwrap       string
+		wantCode    int
+		wantState   string
+		wantSandbox string
+		wantRefusal string
+	}{
+		{name: "container accepted", mode: "container", bwrap: bwrapAvailable, wantCode: 0, wantState: "done", wantSandbox: "container"},
+		{name: "auto takes container", mode: "auto", bwrap: bwrapAvailable, wantCode: 0, wantState: "done", wantSandbox: "container"},
+		{name: "container refused without a namespace", mode: "container", wantCode: 3, wantState: "refused", wantRefusal: "sandbox-unavailable"},
+		{name: "worktree accepted", mode: "worktree", wantCode: 0, wantState: "done", wantSandbox: "worktree"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			inDir(t, t.TempDir())
+			bwrap := tc.bwrap
+			if bwrap == "" {
+				bwrap = bwrapUnavailable
+			}
+			stubPATH(t, map[string]string{"git": gitAbsent, "bwrap": bwrap, "ls": lsStub})
+			base := t.TempDir()
+			if code := run([]string{"run", "--sandbox", tc.mode, "--run-dir", base, "list the files"}); code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			rec := onlyRun(t, base)
+			if rec.Kind != "run" {
+				t.Errorf("kind = %q, want run", rec.Kind)
+			}
+			if rec.State != tc.wantState {
+				t.Errorf("state = %q, want %q", rec.State, tc.wantState)
+			}
+			if rec.Sandbox != tc.wantSandbox {
+				t.Errorf("sandbox = %q, want %q", rec.Sandbox, tc.wantSandbox)
+			}
+			if rec.ExitCode == nil || *rec.ExitCode != tc.wantCode {
+				t.Errorf("exit_code = %v, want %d", rec.ExitCode, tc.wantCode)
+			}
+			switch {
+			case tc.wantRefusal == "" && rec.Refusal != nil:
+				t.Errorf("refusal = %+v, want none", rec.Refusal)
+			case tc.wantRefusal != "" && rec.Refusal == nil:
+				t.Error("no refusal recorded, want one")
+			case tc.wantRefusal != "" && rec.Refusal.Code != tc.wantRefusal:
+				t.Errorf("refusal code = %q, want %q", rec.Refusal.Code, tc.wantRefusal)
+			}
+		})
+	}
+}
+
+// TestRunTaskIsNotReinterpreted is the other half of the usage line's claim:
+// the flags come before the task, and the task is every word from the first
+// non-flag on, unchanged. A sentence that contains "--sandbox" stays a
+// sentence — lifting the word out would switch the mode and drop words from the
+// recorded subject, which is the silent misread this ticket exists to remove.
+func TestRunTaskIsNotReinterpreted(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inDir(t, t.TempDir())
+	stubPATH(t, map[string]string{
+		"git":   gitAbsent,
+		"bwrap": "#!/bin/sh\nexit 0\n",
+		"ls":    "#!/bin/sh\necho inside\n",
+	})
+	base := t.TempDir()
+	// worktree is the word in the sentence and auto answers container on this
+	// stub host, so the mode in the record shows whether the word was taken.
+	const task = "explain why --sandbox worktree is not a mode"
+	if code := run([]string{"run", "--run-dir", base, "explain", "why", "--sandbox", "worktree", "is", "not", "a", "mode"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.Subject != task {
+		t.Errorf("subject = %q, want %q", rec.Subject, task)
+	}
+	if rec.Sandbox != "container" {
+		t.Errorf("sandbox = %q, want container from auto: the task word must not switch the mode", rec.Sandbox)
+	}
+}
+
+// TestRunDoubleDashKeepsADashTask pins the escape the usage line advertises:
+// "--" ends the flags, so a task that begins with a dash word is text and not a
+// mode switch.
+func TestRunDoubleDashKeepsADashTask(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inDir(t, t.TempDir())
+	stubPATH(t, map[string]string{
+		"git":   gitAbsent,
+		"bwrap": "#!/bin/sh\nexit 0\n",
+		"ls":    "#!/bin/sh\necho inside\n",
+	})
+	base := t.TempDir()
+	const task = "--sandbox is a word here"
+	if code := run([]string{"run", "--run-dir", base, "--", "--sandbox", "is", "a", "word", "here"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.Subject != task {
+		t.Errorf("subject = %q, want %q", rec.Subject, task)
+	}
+	if rec.Sandbox != "container" {
+		t.Errorf("sandbox = %q, want container from auto: the word after -- is text", rec.Sandbox)
+	}
+}
+
+// TestRunRecordsARefusedNamespace is the record side of the hole Detect cannot
+// see: bwrap answers its own probe and then refuses this run's mounts. The run
+// is refused at exit 3 with a code in run.json, not recorded as a container run
+// whose only command happened to fail.
+func TestRunRecordsARefusedNamespace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inDir(t, t.TempDir())
+	stubPATH(t, map[string]string{
+		"git":   gitAbsent,
+		"bwrap": "#!/bin/sh\ncase \"$*\" in\n*--unshare-all*)\techo 'bwrap: setting up uid map: Permission denied' >&2; exit 1;;\nesac\nexit 0\n",
+		"ls":    "#!/bin/sh\necho inside\n",
+	})
+	base := t.TempDir()
+	if code := run([]string{"run", "--sandbox", "container", "--run-dir", base, "list the files"}); code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.State != "refused" {
+		t.Errorf("state = %q, want refused", rec.State)
+	}
+	if rec.Refusal == nil {
+		t.Fatal("no refusal recorded: the record says container and nothing else")
+	}
+	if rec.Refusal.Code != "sandbox-unavailable" {
+		t.Errorf("refusal code = %q, want sandbox-unavailable", rec.Refusal.Code)
+	}
+	if !strings.Contains(rec.Refusal.Reason, "Permission denied") {
+		t.Errorf("refusal reason = %q, want bwrap's own words", rec.Refusal.Reason)
+	}
+}

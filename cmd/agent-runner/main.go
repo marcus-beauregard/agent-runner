@@ -63,25 +63,124 @@ func run(args []string) int {
 
 // runAgent runs the offline mock loop in the current directory and prints the
 // same JSON the JavaScript entry point printed.
+//
+// It is the one command that executes children, so it is where --sandbox has
+// teeth: container mode runs every command inside the namespace, and the mode
+// the run got is recorded when --run-dir asks for a record. The directory the
+// run writes is the one it was started in; there is no worktree stage here.
 func runAgent(ctx context.Context, args []string) int {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		usage(os.Stdout)
 		return 0
 	}
-	task := "List the files in this project"
-	if len(args) > 0 {
-		task = strings.Join(args, " ")
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	sandboxMode := fs.String("sandbox", sandbox.Auto, "isolation mode: auto, container or worktree")
+	runDir := fs.String("run-dir", "", "base directory for the run record; no record is written unless it is set")
+	// Flags come before the task, as the usage line says. The flag package stops
+	// at the first non-flag, so everything from there is task text, kept word for
+	// word: a sentence that happens to contain "--sandbox" cannot switch the mode
+	// and cannot lose a word out of the middle of itself. A task that starts with
+	// a dash word is written behind "--", the only terminator this command honours.
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage(os.Stdout)
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "agent-runner: run: %v\n", err)
+		return 1
+	}
+	task := strings.Join(fs.Args(), " ")
+	if task == "" {
+		task = "List the files in this project"
 	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return fail(err)
 	}
+
+	// The mode is decided before the record is written, because it is part of
+	// what the record claims the run was. A mode that does not exist is a usage
+	// error and gets no record: nothing ran, and a record of nothing is noise.
+	mode, warn, modeErr := sandbox.Resolve(ctx, *sandboxMode, sandbox.Detect)
+	if modeErr != nil && !errors.Is(modeErr, report.ErrRefused) {
+		return fail(modeErr)
+	}
+	if warn != "" {
+		fmt.Fprintf(os.Stderr, "agent-runner: warning: %s\n", warn)
+	}
+
+	var rec *runrec.Run
+	if *runDir != "" {
+		rec, err = runrec.New(*runDir, runrec.Meta{Kind: "run", Subject: task, Repo: wd, Sandbox: string(mode)})
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Printf("Run: %s\nDir: %s\n\n", rec.ID, rec.Dir)
+	}
+	// A refusal is a finished run, so it gets a record with its own state rather
+	// than a directory that says running for a process that already exited.
+	if modeErr != nil {
+		if rec != nil {
+			if rerr := rec.Refuse(refusalForMode(modeErr)); rerr != nil {
+				fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
+				return 1
+			}
+		}
+		if code := finishRun(rec, report.ExitCode(modeErr)); code != 0 {
+			return code
+		}
+		return fail(modeErr)
+	}
+
 	registry, err := tools.New(wd)
 	if err != nil {
 		return fail(err)
 	}
+	if mode == sandbox.Container {
+		// The mounts need a tmp and a home that exist before the first command.
+		// A recorded run keeps them beside its record; an unrecorded one gets a
+		// scratch directory that goes away with the process.
+		layout := ""
+		if rec != nil {
+			layout = rec.Dir
+		} else {
+			dir, err := os.MkdirTemp("", "agent-runner-sandbox-")
+			if err != nil {
+				return fail(err)
+			}
+			defer os.RemoveAll(dir)
+			layout = dir
+		}
+		for _, name := range []string{"tmp", "home"} {
+			if err := os.MkdirAll(filepath.Join(layout, name), 0o700); err != nil {
+				return fail(fmt.Errorf("sandbox scratch: %w", err))
+			}
+		}
+		if err := registry.SetIsolation(tools.Isolation{Mode: mode, RunDir: layout}); err != nil {
+			if rec != nil {
+				if rerr := recordRefusal(rec, err); rerr != nil {
+					fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
+					return 1
+				}
+			}
+			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
+				return code
+			}
+			return fail(err)
+		}
+	}
 	result, err := runAudited(ctx, wd, task, agent.MockLLM{}, registry)
 	if err != nil {
+		if rec != nil {
+			if rerr := recordRefusal(rec, err); rerr != nil {
+				fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
+				return 1
+			}
+		}
+		if code := finishRun(rec, report.ExitCode(err)); code != 0 {
+			return code
+		}
 		return fail(err)
 	}
 	out := struct {
@@ -95,7 +194,28 @@ func runAgent(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	if !result.Done {
-		return fail(fmt.Errorf("%w: agent stopped at the step cap", report.ErrNeedsHuman))
+		stopped := fmt.Errorf("%w: agent stopped at the step cap", report.ErrNeedsHuman)
+		if code := finishRun(rec, report.ExitCode(stopped)); code != 0 {
+			return code
+		}
+		return fail(stopped)
+	}
+	if code := finishRun(rec, 0); code != 0 {
+		return code
+	}
+	return 0
+}
+
+// finishRun writes a run's terminal state when it has a record. The result is
+// the process exit code: a record that cannot be written after the run happened
+// is not a success, so it becomes 1.
+func finishRun(rec *runrec.Run, code int) int {
+	if rec == nil {
+		return 0
+	}
+	if err := rec.Finish(code); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-runner: record run outcome: %v\n", err)
+		return 1
 	}
 	return 0
 }
@@ -545,7 +665,9 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `agent-runner — a step-capped autonomous agent runtime and the worker built on it.
 
 Usage:
-  agent-runner run <task>                                        run the offline mock agent
+  agent-runner run [--sandbox auto|container|worktree] [--run-dir <dir>] [--] <task>
+                                                                 run the offline mock agent
+                                                                 (flags come before the task; "--" lets a task start with a dash)
   agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>]
                    [--sandbox auto|container|worktree] --dry-run
                                                                  plan the work, writing nothing but the run record
