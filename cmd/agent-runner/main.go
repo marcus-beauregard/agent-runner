@@ -184,6 +184,12 @@ func runAgent(ctx context.Context, args []string) int {
 	if rec != nil {
 		led, err := runrec.OpenLedger(filepath.Join(rec.Dir, "run.ndjson"))
 		if err != nil {
+			// The run is over before it began, and its record must say so: a
+			// run.json left at running for a process that exited is the state
+			// Finish exists to prevent.
+			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
+				return code
+			}
 			return fail(fmt.Errorf("open record: %w", err))
 		}
 		defer closeRecord(led)
