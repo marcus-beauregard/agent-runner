@@ -1,6 +1,11 @@
 // Package run creates the durable record of a single run: the directory tree
 // every later stage writes into, the run.json that describes it, and the
 // append-only event stream it appends to as it goes.
+//
+// The record also says what the run answered. Every outbound action spends a
+// trigger, named after the event it answers — review:<id>:changes_requested,
+// comment:<id>, or check:<name>:failure — and a trigger id is spent at most
+// once, so a retry or a later scheduled run finds it spent and does nothing.
 package run
 
 import (
