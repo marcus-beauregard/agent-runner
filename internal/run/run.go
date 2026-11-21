@@ -50,6 +50,10 @@ type Meta struct {
 	Branch  string
 	BaseSHA string
 	Budget  string // e.g. "--budget 45m"
+	// Account is the authenticated account the run acted as. Replay recomputes
+	// the plan with the same classifier the command used, and that classifier
+	// cannot tell the run's own reply from a question without it (PRD §8).
+	Account string
 }
 
 // Run is an open run directory.
@@ -69,8 +73,11 @@ type record struct {
 	Branch    string `json:"branch"`
 	BaseSHA   string `json:"base_sha"`
 	Budget    string `json:"budget"`
-	State     string `json:"state"`
-	ExitCode  *int   `json:"exit_code"`
+	// Account is omitted when empty, which is what a run recorded before this
+	// field existed looks like. Replay refuses that rather than guessing it.
+	Account  string `json:"account,omitempty"`
+	State    string `json:"state"`
+	ExitCode *int   `json:"exit_code"`
 }
 
 // New creates <base>/agent-runner/runs/<id>/ with its stages/ subdirectory and
@@ -114,6 +121,7 @@ func New(base string, meta Meta) (*Run, error) {
 		Branch:    meta.Branch,
 		BaseSHA:   meta.BaseSHA,
 		Budget:    meta.Budget,
+		Account:   meta.Account,
 		State:     stateRunning,
 	}
 	if err := writeRecord(dir, rec); err != nil {
