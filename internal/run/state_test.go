@@ -11,6 +11,8 @@ import (
 	"github.com/marcus-beauregard/agent-runner/internal/world"
 )
 
+const testKind = "resolve"
+
 const testSubject = "https://github.com/marcus-beauregard/agent-runner/issues/20"
 
 // testWorld is a thread with something in every field the digest covers, so a
@@ -41,7 +43,7 @@ func testWorld(subject string) world.World {
 // TestLoadStateMissing proves an unrun subject is ErrNoState rather than a plain
 // error: the caller has to tell "never run" from "state is broken".
 func TestLoadStateMissing(t *testing.T) {
-	if _, err := LoadState(t.TempDir(), testSubject); !errors.Is(err, ErrNoState) {
+	if _, err := LoadState(t.TempDir(), testKind, testSubject); !errors.Is(err, ErrNoState) {
 		t.Fatalf("LoadState with no file = %v, want an error wrapping ErrNoState", err)
 	}
 }
@@ -51,10 +53,10 @@ func TestLoadStateMissing(t *testing.T) {
 func TestSaveLoadState(t *testing.T) {
 	base := t.TempDir()
 	want := State{Digest: "abc123", UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
-	if err := SaveState(base, testSubject, want); err != nil {
+	if err := SaveState(base, testKind, testSubject, want); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
-	got, err := LoadState(base, testSubject)
+	got, err := LoadState(base, testKind, testSubject)
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
@@ -64,7 +66,7 @@ func TestSaveLoadState(t *testing.T) {
 	if !got.UpdatedAt.Equal(want.UpdatedAt) {
 		t.Errorf("updated_at = %s, want %s", got.UpdatedAt, want.UpdatedAt)
 	}
-	path, err := statePath(base, testSubject)
+	path, err := statePath(base, testKind, testSubject)
 	if err != nil {
 		t.Fatalf("statePath: %v", err)
 	}
@@ -89,20 +91,20 @@ func TestSaveLoadState(t *testing.T) {
 func TestStateKeyedBySubject(t *testing.T) {
 	base := t.TempDir()
 	other := "https://github.com/marcus-beauregard/agent-runner/issues/21"
-	if err := SaveState(base, testSubject, State{Digest: "one"}); err != nil {
+	if err := SaveState(base, testKind, testSubject, State{Digest: "one"}); err != nil {
 		t.Fatalf("SaveState first: %v", err)
 	}
-	if err := SaveState(base, other, State{Digest: "two"}); err != nil {
+	if err := SaveState(base, testKind, other, State{Digest: "two"}); err != nil {
 		t.Fatalf("SaveState second: %v", err)
 	}
-	s, err := LoadState(base, testSubject)
+	s, err := LoadState(base, testKind, testSubject)
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
 	if s.Digest != "one" {
 		t.Errorf("first subject digest = %q, want one", s.Digest)
 	}
-	if _, err := LoadState(base, other); err != nil {
+	if _, err := LoadState(base, testKind, other); err != nil {
 		t.Fatalf("LoadState other: %v", err)
 	}
 }
@@ -112,7 +114,7 @@ func TestStateKeyedBySubject(t *testing.T) {
 // somebody has to fix.
 func TestLoadStateCorrupt(t *testing.T) {
 	base := t.TempDir()
-	path, err := statePath(base, testSubject)
+	path, err := statePath(base, testKind, testSubject)
 	if err != nil {
 		t.Fatalf("statePath: %v", err)
 	}
@@ -122,10 +124,10 @@ func TestLoadStateCorrupt(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatalf("write corrupt state: %v", err)
 	}
-	if _, err := LoadState(base, testSubject); err == nil || errors.Is(err, ErrNoState) {
+	if _, err := LoadState(base, testKind, testSubject); err == nil || errors.Is(err, ErrNoState) {
 		t.Fatalf("LoadState on corrupt state = %v, want a parse error that is not ErrNoState", err)
 	}
-	if _, err := Unchanged(base, testSubject, "abc"); err == nil {
+	if _, err := Unchanged(base, testKind, testSubject, "abc"); err == nil {
 		t.Fatal("Unchanged on corrupt state = nil error, want the parse error")
 	}
 }
@@ -133,7 +135,7 @@ func TestLoadStateCorrupt(t *testing.T) {
 // TestSaveStateRefusesEmptyDigest keeps a half-built State from writing a file
 // that every later run reads as "state exists, digest empty".
 func TestSaveStateRefusesEmptyDigest(t *testing.T) {
-	if err := SaveState(t.TempDir(), testSubject, State{}); err == nil {
+	if err := SaveState(t.TempDir(), testKind, testSubject, State{}); err == nil {
 		t.Fatal("SaveState with an empty digest = nil, want an error")
 	}
 }
@@ -166,13 +168,13 @@ func TestBegin(t *testing.T) {
 		t.Fatalf("first run directory: %v", err)
 	}
 	// The digest is recorded when the run finishes, not when it starts.
-	if _, err := LoadState(base, testSubject); !errors.Is(err, ErrNoState) {
+	if _, err := LoadState(base, testKind, testSubject); !errors.Is(err, ErrNoState) {
 		t.Fatalf("state exists before the run finished: %v", err)
 	}
-	if err := first.Remember(); err != nil {
+	if err := first.Remember(0); err != nil {
 		t.Fatalf("first Remember: %v", err)
 	}
-	statePathBefore, err := statePath(base, testSubject)
+	statePathBefore, err := statePath(base, testKind, testSubject)
 	if err != nil {
 		t.Fatalf("statePath: %v", err)
 	}
@@ -191,7 +193,7 @@ func TestBegin(t *testing.T) {
 	if second.Run != nil {
 		t.Errorf("second Begin created %s, want no run directory", second.Run.Dir)
 	}
-	if err := second.Remember(); err != nil {
+	if err := second.Remember(0); err != nil {
 		t.Fatalf("Remember on an unchanged start: %v", err)
 	}
 	entries, err := os.ReadDir(runs)
@@ -238,7 +240,7 @@ func TestBeginOtherSubjectIsNewWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Begin: %v", err)
 	}
-	if err := first.Remember(); err != nil {
+	if err := first.Remember(0); err != nil {
 		t.Fatalf("Remember: %v", err)
 	}
 	second, err := Begin(ctx, base, Meta{Kind: "resolve", Subject: other}, fetch, "")
@@ -247,5 +249,89 @@ func TestBeginOtherSubjectIsNewWork(t *testing.T) {
 	}
 	if second.Unchanged {
 		t.Fatal("a different subject was reported unchanged from the first subject's state")
+	}
+}
+
+// TestStateKeyedByKind proves one kind's digest cannot answer for another on the
+// same thread. resolve and amend both take a pull request URL and answer
+// different questions, so a file keyed by the subject alone would let whichever
+// ran first silence the other.
+func TestStateKeyedByKind(t *testing.T) {
+	base := t.TempDir()
+	if err := SaveState(base, "resolve", testSubject, State{Digest: "one"}); err != nil {
+		t.Fatalf("SaveState resolve: %v", err)
+	}
+	if err := SaveState(base, "amend", testSubject, State{Digest: "two"}); err != nil {
+		t.Fatalf("SaveState amend: %v", err)
+	}
+	got, err := LoadState(base, "resolve", testSubject)
+	if err != nil {
+		t.Fatalf("LoadState resolve: %v", err)
+	}
+	if got.Digest != "one" {
+		t.Errorf("resolve digest = %q, want one: the two kinds share a file", got.Digest)
+	}
+	if got.Kind != "resolve" {
+		t.Errorf("loaded kind = %q, want resolve", got.Kind)
+	}
+}
+
+// TestBeginOtherKindIsNewWork is the same collision seen from the fast path: a
+// digest recorded by resolve must not make amend report an unchanged world.
+func TestBeginOtherKindIsNewWork(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	fetch := func(context.Context, string) (world.World, error) { return testWorld(testSubject), nil }
+
+	resolve, err := Begin(ctx, base, Meta{Kind: "resolve", Subject: testSubject}, fetch, "")
+	if err != nil {
+		t.Fatalf("resolve Begin: %v", err)
+	}
+	if err := resolve.Remember(0); err != nil {
+		t.Fatalf("resolve Remember: %v", err)
+	}
+	amend, err := Begin(ctx, base, Meta{Kind: "amend", Subject: testSubject}, fetch, "")
+	if err != nil {
+		t.Fatalf("amend Begin: %v", err)
+	}
+	if amend.Unchanged {
+		t.Fatal("amend on the same subject was reported unchanged from resolve's digest")
+	}
+	if amend.Run == nil {
+		t.Fatal("amend on the same subject created no run directory")
+	}
+}
+
+// TestRememberRefusedDoesNotRecord proves a run that did not finish done leaves
+// no digest behind. A refused run, a failed gate and a needs_human stop all owe
+// the thread work; recording their digest would make every later run exit 0 over
+// a question nobody answered.
+func TestRememberRefusedDoesNotRecord(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	fetch := func(context.Context, string) (world.World, error) { return testWorld(testSubject), nil }
+	meta := Meta{Kind: "resolve", Subject: testSubject}
+
+	for _, code := range []int{1, 2, 3, 4} {
+		start, err := Begin(ctx, base, meta, fetch, "")
+		if err != nil {
+			t.Fatalf("Begin before exit %d: %v", code, err)
+		}
+		if err := start.Run.Finish(code); err != nil {
+			t.Fatalf("Finish(%d): %v", code, err)
+		}
+		if err := start.Remember(code); err != nil {
+			t.Fatalf("Remember(%d): %v", code, err)
+		}
+		if _, err := LoadState(base, "resolve", testSubject); !errors.Is(err, ErrNoState) {
+			t.Fatalf("exit %d recorded a digest: %v", code, err)
+		}
+		again, err := Begin(ctx, base, meta, fetch, "")
+		if err != nil {
+			t.Fatalf("Begin after exit %d: %v", code, err)
+		}
+		if again.Unchanged {
+			t.Errorf("a run that exited %d left the world reported unchanged", code)
+		}
 	}
 }
