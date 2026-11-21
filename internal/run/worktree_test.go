@@ -942,3 +942,39 @@ func TestFinishCleansALegacyRecordWhoseTreeIsGone(t *testing.T) {
 		t.Errorf("stream has no %s: the prune happened without being recorded", kindWorktreeRemove)
 	}
 }
+
+// TestFinishFailsWhenTheLegacyRecordsParentCannotBeRead is the unknown case:
+// a pre-field record whose repo path no longer resolves cannot be checked for
+// a registration, and "could not ask" must not read as "not there". The run
+// fails with a reason instead of finishing done over an entry nobody looked at.
+func TestFinishFailsWhenTheLegacyRecordsParentCannotBeRead(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	rec.Worktree = ""
+	rec.Repo = filepath.Join(t.TempDir(), "gone")
+	if err := writeRecord(r.Dir, *rec); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+	// The tree is gone too, so nothing on disk says whether the parent still
+	// lists it — which is the whole question the parent is being asked.
+	if err := os.RemoveAll(filepath.Join(r.Dir, "worktree")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Finish(0); err == nil {
+		t.Fatal("Finish(0) = nil: an unreadable parent finished the run done without checking its registration")
+	}
+	got, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	if got.State != stateFailed || got.ExitCode == nil || *got.ExitCode != 1 {
+		t.Errorf("record state/exit = %q/%v, want %q/1", got.State, got.ExitCode, stateFailed)
+	}
+}

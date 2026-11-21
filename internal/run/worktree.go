@@ -349,9 +349,12 @@ func CleanupWorktree(runDir string, code int) error {
 		wt = filepath.Join(runDir, "worktree")
 		listed := false
 		if rec.Repo != "" {
-			if l, lerr := worktreeListed(rec.Repo, wt); lerr == nil {
-				listed = l
-			}
+			l, lerr := worktreeListed(rec.Repo, wt)
+			// A parent that cannot be read is not the same answer as a parent
+			// with no entry: it is unknown. Assuming the entry may be there
+			// sends the removal down the path that fails loudly, instead of
+			// finishing done over a registration nobody checked.
+			listed = lerr != nil || l
 		}
 		if !listed {
 			if _, serr := os.Lstat(wt); errors.Is(serr, os.ErrNotExist) {
