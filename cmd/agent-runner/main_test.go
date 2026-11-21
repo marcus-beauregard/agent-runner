@@ -3,14 +3,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/marcus-beauregard/agent-runner/internal/agent"
+	"github.com/marcus-beauregard/agent-runner/internal/audit"
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
+	"github.com/marcus-beauregard/agent-runner/internal/report"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
+	"github.com/marcus-beauregard/agent-runner/internal/tools"
 	"github.com/marcus-beauregard/agent-runner/internal/world"
 )
 
@@ -147,6 +154,417 @@ func captureStdout(t *testing.T, fn func() int) (string, int) {
 		t.Fatalf("read captured stdout: %v", err)
 	}
 	return string(out), code
+}
+
+// captureStderr is captureStdout's twin, for the lines a refusal prints where
+// a person will read them. Both replace the file the process writes to, so the
+// command under test stays unaware of the capture.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = wr
+	fn()
+	wr.Close()
+	os.Stderr = old
+	out, err := io.ReadAll(rd)
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	return string(out)
+}
+
+// inDir runs the rest of the test from dir, then puts the working directory
+// back. run() takes no directory argument — the process cwd is what a test has
+// to move — so the restore is a cleanup rather than a defer, to survive a
+// failing assertion.
+func inDir(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir %s: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatalf("chdir back to %s: %v", old, err)
+		}
+	})
+}
+
+// writingLLM is a model that writes a file before it answers. It hands the loop
+// the one thing the toolset refuses — a write outside the working directory —
+// so the audit is what has to catch it.
+type writingLLM struct {
+	path string
+}
+
+var _ agent.LLM = writingLLM{}
+
+func (w writingLLM) Complete(ctx context.Context, prompt string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(w.path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(w.path, []byte("escape\n"), 0o600); err != nil {
+		return "", err
+	}
+	return "DONE", nil
+}
+
+// TestRunRefusesAHostWrite is #85 at the loop: a write outside the run directory
+// is refused, named on stderr, and exits 3 — not printed as a successful run
+// with an escape file left behind it.
+func TestRunRefusesAHostWrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wd := t.TempDir()
+	registry, err := tools.New(wd)
+	if err != nil {
+		t.Fatalf("tools.New: %v", err)
+	}
+	// A real home already has ~/.config; without it the audit would name the
+	// directory that appeared rather than the file written inside it, which is
+	// a different (and shallower) finding than the escape being tested.
+	if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+		t.Fatalf("prepare home: %v", err)
+	}
+	escape := filepath.Join(home, ".config", "agent-runner-escape")
+
+	var got error
+	stderr := captureStderr(t, func() {
+		_, got = runAudited(context.Background(), wd, "tidy up", writingLLM{path: escape}, registry)
+	})
+	if got == nil {
+		t.Fatal("the run reported success after a write outside its directory")
+	}
+	var refusal *refuse.Refusal
+	if !errors.As(got, &refusal) {
+		t.Fatalf("error = %v, want a *refuse.Refusal", got)
+	}
+	if refusal.Code != refuse.OutsideRunDir {
+		t.Errorf("refusal code = %q, want %q", refusal.Code, refuse.OutsideRunDir)
+	}
+	if refusal.Where != "audit" {
+		t.Errorf("refusal stage = %q, want audit", refusal.Where)
+	}
+	if code := report.ExitCode(got); code != 3 {
+		t.Errorf("exit code = %d, want 3", code)
+	}
+	if !strings.Contains(stderr, escape) {
+		t.Errorf("stderr does not name %s:\n%s", escape, stderr)
+	}
+	if _, ok := refusal.Evidence[escape]; !ok {
+		t.Errorf("evidence does not carry %s: %v", escape, refusal.Evidence)
+	}
+}
+
+// TestCleanRunHasNoDrift is the other half: the same audit around a loop that
+// writes only where it should exits 0 and prints its result. The snapshot is
+// asserted non-empty too — an audit that watched nothing would pass the drift
+// check while proving nothing at all.
+func TestCleanRunHasNoDrift(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wd := t.TempDir()
+	inDir(t, wd)
+
+	snap, err := snapshotHost(wd)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if len(snap) == 0 {
+		t.Fatal("the audit watched nothing: every root was excluded")
+	}
+
+	out, code := captureStdout(t, func() int { return run([]string{"run", "list the files"}) })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "\"done\": true") {
+		t.Errorf("clean run did not report a finished result:\n%s", out)
+	}
+}
+
+// gitRepo makes a directory a real repository, so the tests ask repoRoot the
+// question a run asks instead of assuming the answer.
+func gitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--quiet", dir).CombinedOutput(); err != nil {
+		t.Skipf("git init: %v: %s", err, out)
+	}
+	return dir
+}
+
+// TestSnapshotWatchesTheRepositoryAroundTheRun is the first half of the blocker
+// on #90: with the run directory inside the checkout, the checkout is in the
+// snapshot, so a write beside the run directory is drift and a write inside it
+// is not.
+func TestSnapshotWatchesTheRepositoryAroundTheRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+	runDir := filepath.Join(repo, "work")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+
+	before, err := snapshotHost(runDir)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if _, ok := before[repo]; !ok {
+		t.Fatalf("the checkout %s is not watched (%d roots in the snapshot)", repo, len(before))
+	}
+
+	if err := os.WriteFile(filepath.Join(runDir, "scratch.txt"), []byte("mine\n"), 0o600); err != nil {
+		t.Fatalf("write in the run directory: %v", err)
+	}
+	stray := filepath.Join(repo, "stray.txt")
+	if err := os.WriteFile(stray, []byte("not mine\n"), 0o600); err != nil {
+		t.Fatalf("write beside the run directory: %v", err)
+	}
+	after, err := snapshotHost(runDir)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	seen := make(map[string]bool, len(audit.Compare(before, after)))
+	for _, d := range audit.Compare(before, after) {
+		seen[d.Path] = true
+	}
+	if !seen[stray] {
+		t.Errorf("drift did not name %s: %v", stray, seen)
+	}
+	for path := range seen {
+		if path == runDir || strings.HasPrefix(path, runDir+string(filepath.Separator)) {
+			t.Errorf("the run's own write under %s was reported as drift: %v", runDir, seen)
+		}
+	}
+}
+
+// TestSnapshotAtTheRepositoryRootClaimsNoRepositoryWatch is the second half: at
+// the checkout root the whole tree is the run's to write, so no repository root
+// is claimed — and a write in it is not drift. The alternative reading, that the
+// checkout is watched and every write in it is an escape, would refuse the
+// ordinary way to run the command.
+func TestSnapshotAtTheRepositoryRootClaimsNoRepositoryWatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+
+	before, err := snapshotHost(repo)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if len(before) == 0 {
+		t.Fatal("the audit watched nothing at all")
+	}
+	for path := range before {
+		if path == repo || strings.HasPrefix(path, repo+string(filepath.Separator)) {
+			t.Errorf("the checkout is in the snapshot as %s, but it is the run directory", path)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "written-by-the-run.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("write in the run directory: %v", err)
+	}
+	after, err := snapshotHost(repo)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if drift := audit.Compare(before, after); len(drift) != 0 {
+		t.Errorf("a write in the run directory was drift: %v", drift)
+	}
+}
+
+// TestSnapshotFollowsTheRunDirectoryThroughASymlink is the review's first
+// blocker: os.Getwd keeps the symlink the caller walked through while git
+// prints the physical path, so the ignore and the repository walk named one
+// directory two ways and the run's own writes came back as drift.
+func TestSnapshotFollowsTheRunDirectoryThroughASymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+	work := filepath.Join(repo, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(work, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	before, err := snapshotHost(link)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "scratch.txt"), []byte("mine\n"), 0o600); err != nil {
+		t.Fatalf("write in the run directory: %v", err)
+	}
+	stray := filepath.Join(repo, "stray.txt")
+	if err := os.WriteFile(stray, []byte("not mine\n"), 0o600); err != nil {
+		t.Fatalf("write beside the run directory: %v", err)
+	}
+	after, err := snapshotHost(link)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, d := range audit.Compare(before, after) {
+		seen[d.Path] = true
+	}
+	if !seen[stray] {
+		t.Errorf("drift did not name %s: %v", stray, seen)
+	}
+	for path := range seen {
+		if path == work || strings.HasPrefix(path, work+string(filepath.Separator)) {
+			t.Errorf("the run's own write under %s was reported as drift: %v", work, seen)
+		}
+	}
+}
+
+// TestRunAuditedUnderASymlinkedHome is the follow-up blocker: $HOME is often
+// a symlink, and a run in a directory under it must not have its own writes
+// read as drift, any more than a run under a symlinked checkout may.
+func TestRunAuditedUnderASymlinkedHome(t *testing.T) {
+	realHome := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(realHome, home); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	t.Setenv("HOME", home)
+	runDir := filepath.Join(home, "project")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	registry, err := tools.New(runDir)
+	if err != nil {
+		t.Fatalf("tools.New: %v", err)
+	}
+
+	if _, err := runAudited(context.Background(), runDir, "tidy up",
+		writingLLM{path: filepath.Join(runDir, "note.txt")}, registry); err != nil {
+		t.Fatalf("a write in the run directory was refused: %v", err)
+	}
+}
+
+// TestSnapshotRefusesAHomeItDidNotWatch pins the guard: Take skips a root that
+// does not exist without a word, so a home that was never sampled used to read
+// as a clean run over a machine the audit had half seen.
+func TestSnapshotRefusesAHomeItDidNotWatch(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "gone")
+	t.Setenv("HOME", home)
+	if _, err := snapshotHost(t.TempDir()); err == nil {
+		t.Fatalf("a home that does not exist (%s) was reported as watched", home)
+	}
+}
+
+// TestRepoRootIgnoresTheCallersGitEnvironment is the second blocker: an
+// exported GIT_DIR or GIT_CEILING_DIRECTORIES used to make a checkout inside
+// the repository answer "not a git repository", so the run reported clean over
+// a watch that was never established.
+func TestRepoRootIgnoresTheCallersGitEnvironment(t *testing.T) {
+	repo := gitRepo(t)
+	sub := filepath.Join(repo, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", repo)
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "elsewhere", ".git"))
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+
+	root, err := repoRoot(sub)
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	if !sameDir(root, repo) {
+		t.Errorf("repoRoot = %q, want %q", root, repo)
+	}
+}
+
+// TestRunAuditedInsideACheckout is the composition neither half-test covered:
+// the snapshots and the loop together in a real repository, where the run's own
+// write in its directory is not drift and a write beside it is a refusal.
+func TestRunAuditedInsideACheckout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+	runDir := filepath.Join(repo, "work")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	registry, err := tools.New(runDir)
+	if err != nil {
+		t.Fatalf("tools.New: %v", err)
+	}
+
+	t.Run("own write", func(t *testing.T) {
+		_, err := runAudited(context.Background(), runDir, "tidy up",
+			writingLLM{path: filepath.Join(runDir, "note.txt")}, registry)
+		if err != nil {
+			t.Fatalf("a write in the run directory was refused: %v", err)
+		}
+	})
+	t.Run("write beside it", func(t *testing.T) {
+		escape := filepath.Join(repo, "stray.txt")
+		var got error
+		captureStderr(t, func() {
+			_, got = runAudited(context.Background(), runDir, "tidy up", writingLLM{path: escape}, registry)
+		})
+		var refusal *refuse.Refusal
+		if !errors.As(got, &refusal) {
+			t.Fatalf("error = %v, want a *refuse.Refusal", got)
+		}
+		if refusal.Code != refuse.OutsideRunDir {
+			t.Errorf("refusal code = %q, want %q", refusal.Code, refuse.OutsideRunDir)
+		}
+		if _, ok := refusal.Evidence[escape]; !ok {
+			t.Errorf("evidence does not carry %s: %v", escape, refusal.Evidence)
+		}
+	})
+}
+
+// TestRepoRootTellsAbsenceFromFailure pins the distinction the review asked for:
+// git answering "not a repository" leaves nothing to watch, while git failing to
+// answer is a watch that was never established and has to stop the run rather
+// than report it clean.
+func TestRepoRootTellsAbsenceFromFailure(t *testing.T) {
+	t.Run("not a repository", func(t *testing.T) {
+		stubPATH(t, map[string]string{"git": "#!/bin/sh\nprintf '%s\\n' 'fatal: not a git repository (or any of the parent directories): .git' >&2\nexit 128\n"})
+		root, err := repoRoot(t.TempDir())
+		if err != nil {
+			t.Fatalf("repoRoot: %v", err)
+		}
+		if root != "" {
+			t.Errorf("repoRoot = %q, want empty", root)
+		}
+	})
+	t.Run("git failed", func(t *testing.T) {
+		stubPATH(t, map[string]string{"git": "#!/bin/sh\nprintf '%s\\n' 'fatal: cannot read config' >&2\nexit 1\n"})
+		if _, err := repoRoot(t.TempDir()); err == nil {
+			t.Fatal("a failed git lookup read as \"no repository\"")
+		}
+	})
+	t.Run("git is missing", func(t *testing.T) {
+		stubPATH(t, map[string]string{})
+		if _, err := repoRoot(t.TempDir()); err == nil {
+			t.Fatal("a missing git read as \"no repository\"")
+		}
+	})
+	t.Run("a repository git refused to describe", func(t *testing.T) {
+		// A broken submodule gitdir says "not a git repository: <path>" with
+		// exit 128 too. It is a failure to answer, not the absence of a
+		// repository, and reading it as absence would drop the watch.
+		stubPATH(t, map[string]string{"git": "#!/bin/sh\nprintf '%s\\n' 'fatal: not a git repository: /repo/.git/modules/sub' >&2\nexit 128\n"})
+		if _, err := repoRoot(t.TempDir()); err == nil {
+			t.Fatal("a repository git refused to describe read as \"no repository\"")
+		}
+	})
 }
 
 // TestReportCommand is the CLI half of the report: a recorded run prints the

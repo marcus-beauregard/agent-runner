@@ -10,11 +10,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/marcus-beauregard/agent-runner/internal/agent"
+	"github.com/marcus-beauregard/agent-runner/internal/audit"
 	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
@@ -77,7 +80,7 @@ func runAgent(ctx context.Context, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	result, err := agent.Run(ctx, task, agent.MockLLM{}, agent.Options{}, registry)
+	result, err := runAudited(ctx, wd, task, agent.MockLLM{}, registry)
 	if err != nil {
 		return fail(err)
 	}
@@ -95,6 +98,231 @@ func runAgent(ctx context.Context, args []string) int {
 		return fail(fmt.Errorf("%w: agent stopped at the step cap", report.ErrNeedsHuman))
 	}
 	return 0
+}
+
+// runAudited runs the loop with the host audited around it. The audit watches
+// the machine, not the checkout (PRD §6.2): wd is where the run is supposed to
+// write and is excluded, so anything else that moves while the loop runs is
+// drift, and the run refuses rather than reporting a clean result over it.
+func runAudited(ctx context.Context, wd, task string, llm agent.LLM, toolset agent.Toolset) (agent.Result, error) {
+	before, err := snapshotHost(wd)
+	if err != nil {
+		return agent.Result{}, err
+	}
+	result, runErr := agent.Run(ctx, task, llm, agent.Options{}, toolset)
+	after, err := snapshotHost(wd)
+	if err != nil {
+		return agent.Result{}, err
+	}
+	drift := audit.Compare(before, after)
+	if len(drift) == 0 {
+		return result, runErr
+	}
+	// The machine moving is the news the caller has to act on, so the refusal
+	// wins over whatever the loop was about to say. The loop's own error, if it
+	// had one, goes into the evidence instead of being dropped on the floor.
+	return result, refuseDrift(drift, runErr)
+}
+
+// snapshotHost records every place a run must leave alone. runDir is the run's
+// working directory, excluded together with everything under it. repo is the
+// checkout around runDir, watched from its root so a write beside the run
+// directory is caught, and passed to the watchlist so the one repository path
+// the audit excuses is the .git/worktrees bookkeeping that `git worktree add`
+// writes.
+//
+// When runDir is the checkout root itself the two are the same path and there
+// is no repository path outside the run: "outside the run directory" would have
+// nothing in the checkout to mean, so the repository adds no root of its own.
+// That is a narrowing of the claim, not a silent exclusion — the audit never
+// says it watched a repository when the whole of it was the run's to write.
+func snapshotHost(runDir string) (audit.Snapshot, error) {
+	// os.Getwd keeps the spelling the caller walked through, git prints the
+	// physical one, and $HOME is often a symlink of its own. The watchlist and
+	// the ignores only line up when every path they are built from is the same
+	// physical spelling the walk produces, so each one is resolved once here:
+	// a run directory under a symlinked home otherwise has its own writes read
+	// as drift.
+	resolved, err := filepath.EvalSymlinks(runDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve run directory %s: %w", runDir, err)
+	}
+	runDir = resolved
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("locate home directory: %w", err)
+	}
+	home = canonical(home)
+	stateBase, err := runrec.StateBase()
+	if err != nil {
+		return nil, err
+	}
+	stateBase = canonical(stateBase)
+	repo, err := repoRoot(runDir)
+	if err != nil {
+		return nil, err
+	}
+	if repo != "" {
+		repo = canonical(repo)
+	}
+	if repo != "" && sameDir(repo, runDir) {
+		repo = ""
+	}
+	snap, err := audit.Take(audit.Watchlist(home, repo), audit.Ignores(home, stateBase, runDir, repo))
+	if err != nil {
+		return nil, err
+	}
+	// Take skips a root an ignore already covers without a word, and a root
+	// that does not exist without a word too. A watchlist excluded in full
+	// would then report no drift on nothing watched — the shape of bug that
+	// made #54 split — and a home that silently contributed nothing is the
+	// same lie one step quieter, so name both instead of auditing a machine
+	// that was only partly sampled.
+	if len(snap) == 0 {
+		return nil, errors.New("audit: every watchlist root was excluded; nothing was watched")
+	}
+	if _, ok := snap[home]; !ok {
+		return nil, fmt.Errorf("audit: %s was not watched", home)
+	}
+	if repo != "" {
+		if _, ok := snap[repo]; !ok {
+			return nil, fmt.Errorf("audit: the checkout %s was not watched", repo)
+		}
+	}
+	return snap, nil
+}
+
+// sameDir reports whether two paths name the same directory. snapshotHost has
+// already resolved the run directory, so this is the belt to that braces: git
+// may still print the checkout in a spelling of its own, and a repository the
+// run has already excluded under another name must not be watched again.
+func sameDir(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
+// repoRoot is the checkout dir belongs to, or "" when it is not inside one.
+// The two answers stay apart: "there is no repository" means there is nothing
+// to watch, while git failing to answer means the watch was never established —
+// and a run that reports clean over that is #85 in a new coat.
+func repoRoot(dir string) (string, error) {
+	var stderr strings.Builder
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	// The answer has to be about dir, so the caller's git environment must not
+	// change it: GIT_CEILING_DIRECTORIES makes a directory inside a checkout
+	// answer "not a git repository", GIT_DIR answers for another tree entirely,
+	// and LC_ALL decides which sentence the answer arrives in — which the
+	// classification below reads.
+	cmd.Env = gitReadEnv()
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err == nil {
+		root := strings.TrimSpace(string(out))
+		if root == "" {
+			return "", fmt.Errorf("git rev-parse --show-toplevel in %s printed nothing", dir)
+		}
+		// A root that does not contain dir is an answer about somewhere else;
+		// watching it would report on a tree this run is not in.
+		if !contains(root, dir) {
+			return "", fmt.Errorf("git rev-parse --show-toplevel in %s printed %s, which does not contain it", dir, root)
+		}
+		return root, nil
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return "", fmt.Errorf("run git rev-parse in %s: %w", dir, err)
+	}
+	// git's answer for "discovery found no repository" names its search scope in
+	// parentheses and exits 128. A message that names a path after the colon —
+	// "not a git repository: <path>", which a broken submodule gitdir prints
+	// with the same exit code — is a repository git refused to open, and a
+	// repository it refused to describe has to stop the run, not read as
+	// nothing to watch.
+	msg := strings.TrimSpace(stderr.String())
+	if exit.ExitCode() == 128 && strings.Contains(msg, "not a git repository") && !strings.Contains(msg, "not a git repository: ") {
+		return "", nil
+	}
+	return "", fmt.Errorf("git rev-parse --show-toplevel in %s: %v: %s", dir, err, msg)
+}
+
+// gitReadEnv is the environment for a read-only git question about a directory:
+// the caller's repository selection is removed and the locale is pinned, so the
+// answer is about dir on a host whose shell was set up some other way.
+func gitReadEnv() []string {
+	drop := []string{
+		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_COMMON_DIR=",
+		"GIT_CEILING_DIRECTORIES=", "GIT_DISCOVERY_ACROSS_FILESYSTEM=",
+		"LC_ALL=", "LC_MESSAGES=",
+	}
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		skip := false
+		for _, prefix := range drop {
+			if strings.HasPrefix(kv, prefix) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "LC_ALL=C")
+}
+
+// canonical is the physical spelling of path, symlinks followed. A path that
+// does not exist yet — the state directory before the first run — is resolved
+// as far as its parent, so the answer still lines up with the walk once the
+// directory appears.
+func canonical(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path
+	}
+	return filepath.Join(canonical(parent), filepath.Base(path))
+}
+
+// contains reports whether root is dir or one of its ancestors, by path
+// component, so /a/bc does not read as containing /a/b.
+func contains(root, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(dir))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// refuseDrift prints one line per drifted path and returns the refusal naming
+// the audit as its stage. The paths are on stderr because that is the part a
+// person acts on; the same paths go into the evidence with what moved, so a
+// record of the run can be checked against them.
+func refuseDrift(drift []audit.Drift, cause error) *refuse.Refusal {
+	evidence := make(map[string]string, len(drift)+1)
+	for _, d := range drift {
+		what := d.Kind
+		if d.Detail != "" {
+			what += ": " + d.Detail
+		}
+		fmt.Fprintf(os.Stderr, "agent-runner: drift: %s (%s)\n", d.Path, what)
+		evidence[d.Path] = what
+	}
+	if cause != nil {
+		evidence["agent"] = cause.Error()
+	}
+	r := refuse.New(refuse.OutsideRunDir, "audit",
+		fmt.Sprintf("%d path(s) outside the run directory changed during the run", len(drift)))
+	r.Evidence = evidence
+	return r
 }
 
 // work runs the M0 dry-run: it plans the change and prints the gate it would

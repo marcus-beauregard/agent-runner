@@ -316,6 +316,13 @@ func defaultBase() (string, error) {
 	return filepath.Join(home, ".local", "state"), nil
 }
 
+// StateBase returns the directory run records live under, resolved exactly as
+// New resolves a base it was not given. A caller that has to exclude this
+// program's own bookkeeping — the host audit does, or it flags every run it
+// writes — asks here rather than repeating the XDG_STATE_HOME rule: two copies
+// of that rule drift, and the exclusion then quietly covers nothing.
+func StateBase() (string, error) { return defaultBase() }
+
 // generateID is newID behind a variable so a test can force the collision New
 // refuses; nothing in the program reassigns it.
 var generateID = newID
