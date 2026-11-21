@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 )
 
 // stubGH puts a gh on PATH that prints out and exits with code, so the tests
@@ -94,6 +96,28 @@ func TestWorkRecordsBothOutcomes(t *testing.T) {
 				t.Error("id is empty")
 			}
 		})
+	}
+}
+
+// TestReportCommand is the CLI half of the report: a recorded run prints, an id
+// that does not exist exits 1, and asking for nothing exits 1.
+func TestReportCommand(t *testing.T) {
+	base := t.TempDir()
+	r, err := runrec.New(base, runrec.Meta{Kind: "build", Subject: "https://example.test/issues/33"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if code := reportRun([]string{r.ID, "--run-dir", base}); code != 0 {
+		t.Errorf("report on a recorded run = %d, want 0", code)
+	}
+	if code := reportRun([]string{"20260101-000000.000000-nope", "--run-dir", base}); code != 1 {
+		t.Errorf("report on an unknown id = %d, want 1", code)
+	}
+	if code := reportRun(nil); code != 1 {
+		t.Errorf("report with no id = %d, want 1", code)
 	}
 }
 

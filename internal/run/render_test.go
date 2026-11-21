@@ -1,0 +1,206 @@
+package run
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// newTestRun creates one run under a fresh base, so a test can hand the same
+// base to Locate and to RenderReport.
+func newTestRun(t *testing.T) (*Run, string) {
+	t.Helper()
+	base := t.TempDir()
+	r, err := New(base, Meta{
+		Kind:    "build",
+		Subject: "https://example.test/issues/33",
+		Repo:    "/tmp/repo",
+		Branch:  "agent/report",
+		BaseSHA: "abc1234",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return r, base
+}
+
+// appendEvent adds one event to the run's ledger, the way a pipeline would:
+// open, append, close.
+func appendEvent(t *testing.T, r *Run, kind, stage string, data any) {
+	t.Helper()
+	l, err := OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	if err := l.Append(kind, stage, data); err != nil {
+		t.Fatalf("Append %s: %v", kind, err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestRenderReport is the ticket's "done when": a run with known events prints a
+// document a stranger can follow — the header, the stages in order, the gates,
+// the exit code, and what is unfinished — without inventing anything the record
+// does not say.
+func TestRenderReport(t *testing.T) {
+	r, _ := newTestRun(t)
+	appendEvent(t, r, "stage", "01-triage", stageData{Event: "start"})
+	appendEvent(t, r, "stage", "01-triage", stageData{Event: "finish", Hash: "sha256:aaa"})
+	appendEvent(t, r, "gate", "01-triage", gateData{Command: "gofmt -l .", DurationMS: 12})
+	appendEvent(t, r, "stage", "02-scope", stageData{Event: "start"})
+	appendEvent(t, r, "gate", "02-scope", gateData{
+		Command:    "go test ./...",
+		ExitCode:   1,
+		DurationMS: 4200,
+		OutputTail: "FAIL\texample.test\t0.4s\n--- FAIL: TestX\n",
+	})
+	appendEvent(t, r, "decision", "02-scope", decisionData{
+		Question: "Which of the two call sites is the cause?",
+		Answer:   "The second.",
+	})
+	appendEvent(t, r, "decision", "02-scope", decisionData{Question: "Does the gate need network?"})
+	if err := r.Finish(2); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+
+	for _, want := range []string{
+		"# Run " + r.ID,
+		"- Kind: build",
+		"- Subject: https://example.test/issues/33",
+		"- Base: abc1234",
+		"- State: failed",
+		"- Exit code: 2",
+		"## 01-triage",
+		"- Output hash: sha256:aaa",
+		"## 02-scope",
+		"## Gates",
+		"| 01-triage | gofmt -l . | 0 | 12ms |",
+		"| 02-scope | go test ./... | 1 | 4.2s |",
+		"FAIL example.test 0.4s --- FAIL: TestX",
+		"answered: The second.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report does not contain %q\n---\n%s", want, got)
+		}
+	}
+
+	if i, j := strings.Index(got, "## 01-triage"), strings.Index(got, "## 02-scope"); i < 0 || j < 0 || i > j {
+		t.Errorf("stages are not in ledger order: 01-triage at %d, 02-scope at %d", i, j)
+	}
+
+	left := got[strings.Index(got, "## Left to do"):]
+	for _, want := range []string{
+		"Stage 02-scope started and never finished",
+		"Gate go test ./... failed with exit 1.",
+		"left a question open",
+	} {
+		if !strings.Contains(left, want) {
+			t.Errorf("Left to do does not contain %q\n---\n%s", want, left)
+		}
+	}
+	if strings.Contains(left, "01-triage") {
+		t.Errorf("Left to do names a finished stage\n---\n%s", left)
+	}
+}
+
+// TestRenderReportEmptyLedger covers the record just after New: run.json, no
+// stream. That is a header and a resumable run, not an error and not a claim
+// that nothing happened.
+func TestRenderReportEmptyLedger(t *testing.T) {
+	r, _ := newTestRun(t)
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		"# Run " + r.ID,
+		"- State: running",
+		"- Exit code: none yet",
+		"## Left to do",
+		"still says running",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report does not contain %q\n---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "## Gates") {
+		t.Errorf("an empty ledger rendered a gates section\n---\n%s", got)
+	}
+}
+
+// TestRenderReportIgnoredTornTail is the crash case: the last write died
+// mid-line. The fragment held no event, so it is dropped and noted, and the
+// reporting itself leaves the file exactly as it found it.
+func TestRenderReportIgnoredTornTail(t *testing.T) {
+	r, _ := newTestRun(t)
+	appendEvent(t, r, "stage", "01-triage", stageData{Event: "start"})
+
+	path := filepath.Join(r.Dir, "run.ndjson")
+	whole, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	torn := []byte(`{"seq":2,"ts":"2026-11-21T00:00:00Z","kind":"stage","stage":"02-half`)
+	if err := os.WriteFile(path, append(whole, torn...), 0o600); err != nil {
+		t.Fatalf("write torn ledger: %v", err)
+	}
+
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "torn final line") {
+		t.Errorf("the report did not note the torn line\n---\n%s", got)
+	}
+	if strings.Contains(got, "02-half") {
+		t.Errorf("the report rendered a torn line\n---\n%s", got)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read ledger again: %v", err)
+	}
+	if !bytes.Equal(after, append(whole, torn...)) {
+		t.Error("RenderReport modified the ledger; it must only read")
+	}
+}
+
+// TestRenderReportRejectsCorruptLine is the other half of the torn-tail rule: a
+// whole line that does not parse may have held a stage.finish, so the report
+// fails instead of reading past it.
+func TestRenderReportRejectsCorruptLine(t *testing.T) {
+	r, _ := newTestRun(t)
+	path := filepath.Join(r.Dir, "run.ndjson")
+	if err := os.WriteFile(path, []byte("{\"seq\":1}\nnot an event\n"), 0o600); err != nil {
+		t.Fatalf("write ledger: %v", err)
+	}
+	if _, err := RenderReport(r.Dir); err == nil {
+		t.Fatal("RenderReport read past a line that is not an event")
+	}
+}
+
+// TestLocate keeps an id a name: the right directory is found, and anything that
+// is not a run under base is ErrNoRecord rather than a path somebody chose.
+func TestLocate(t *testing.T) {
+	r, base := newTestRun(t)
+	if dir, err := Locate(base, r.ID); err != nil || dir != r.Dir {
+		t.Fatalf("Locate = %q, %v; want %q", dir, err, r.Dir)
+	}
+	for _, id := range []string{"", "20260101-000000.000000-nope", "../../etc", "..", "."} {
+		if _, err := Locate(base, id); !errors.Is(err, ErrNoRecord) {
+			t.Errorf("Locate(%q) error = %v, want ErrNoRecord", id, err)
+		}
+	}
+}
