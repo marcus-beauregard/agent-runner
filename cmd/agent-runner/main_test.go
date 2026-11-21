@@ -70,8 +70,8 @@ type record struct {
 	} `json:"refusal"`
 }
 
-// onlyRun digs the single run directory out of base and returns its record.
-func onlyRun(t *testing.T, base string) record {
+// onlyRunDir digs the single run directory out of base.
+func onlyRunDir(t *testing.T, base string) string {
 	t.Helper()
 	runs := filepath.Join(base, "agent-runner", "runs")
 	entries, err := os.ReadDir(runs)
@@ -81,7 +81,13 @@ func onlyRun(t *testing.T, base string) record {
 	if len(entries) != 1 {
 		t.Fatalf("runs directory holds %d entries, want 1", len(entries))
 	}
-	b, err := os.ReadFile(filepath.Join(runs, entries[0].Name(), "run.json"))
+	return filepath.Join(runs, entries[0].Name())
+}
+
+// onlyRun digs the single run directory out of base and returns its record.
+func onlyRun(t *testing.T, base string) record {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(onlyRunDir(t, base), "run.json"))
 	if err != nil {
 		t.Fatalf("read run.json: %v", err)
 	}

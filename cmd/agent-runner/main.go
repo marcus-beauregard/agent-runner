@@ -28,6 +28,12 @@ import (
 // version is the default; ldflags may override it at build time.
 var version = "2.0.0"
 
+// model is the planner the run command drives. The deterministic mock is the
+// default and the binary has no flag that could replace it; a test swaps this
+// to make the loop attempt one specific thing, which is the only way to attack
+// the pipeline with a model that does not plan the same run every time.
+var model agent.LLM = agent.MockLLM{}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -170,7 +176,20 @@ func runAgent(ctx context.Context, args []string) int {
 			return fail(err)
 		}
 	}
-	result, err := runAudited(ctx, wd, task, agent.MockLLM{}, registry)
+	// A command is the run's most consequential act, so its record belongs to
+	// the run rather than to the process that happened to run it. The stream is
+	// opened before the first command and closed after the last, so a run that
+	// is killed mid-command still leaves the events of the commands before it.
+	// An unrecorded run has nowhere to put them and, as before, keeps nothing.
+	if rec != nil {
+		led, err := runrec.OpenLedger(filepath.Join(rec.Dir, "run.ndjson"))
+		if err != nil {
+			return fail(fmt.Errorf("open record: %w", err))
+		}
+		defer closeRecord(led)
+		registry.SetLedger(led)
+	}
+	result, err := runAudited(ctx, wd, task, model, registry)
 	if err != nil {
 		if rec != nil {
 			if rerr := recordRefusal(rec, err); rerr != nil {
@@ -204,6 +223,16 @@ func runAgent(ctx context.Context, args []string) int {
 		return code
 	}
 	return 0
+}
+
+// closeRecord closes the run's stream once the run is over. Every event is
+// synced as it is written, so a close that fails has cost no event: it is said
+// out loud instead of becoming a second exit code over a run whose outcome is
+// already on disk.
+func closeRecord(l *runrec.Ledger) {
+	if err := l.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-runner: close record: %v\n", err)
+	}
 }
 
 // finishRun writes a run's terminal state when it has a record. The result is
