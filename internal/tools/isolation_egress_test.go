@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,19 +23,6 @@ const probeName = "./probe"
 
 // probeEnv carries the listener address to the copied binary.
 const probeEnv = "CAGE_PROBE_ADDR"
-
-// containerOrSkip skips unless this host can build the namespace the fixtures
-// need, naming the capability it lacked: an attack test that quietly does not
-// attack is worse than one that says it could not run.
-func containerOrSkip(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skipf("bubblewrap is not installed: %v", err)
-	}
-	if err := exec.Command("bwrap", "--ro-bind", "/", "/", "--unshare-net", "true").Run(); err != nil {
-		t.Skipf("this host cannot build a container namespace: %v", err)
-	}
-}
 
 // TestContainerChildHasNoEgress is #58's third attack in the half this ticket
 // can assert: a child inside the cage cannot open a connection to a listener

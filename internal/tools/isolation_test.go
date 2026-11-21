@@ -3,7 +3,9 @@ package tools
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -29,6 +31,24 @@ func containerRoots(t *testing.T) (root, runDir string) {
 		}
 	}
 	return root, runDir
+}
+
+// containerOrSkip skips unless this host can build the namespace the fixtures
+// need, naming the capability it lacked: an attack test that quietly does not
+// attack is worse than one that says it could not run. It lives in this
+// untagged file because both the container tests call it and the platform that
+// cannot build a namespace has to compile it to skip it.
+func containerOrSkip(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("container namespaces are linux-only, and this is %s", runtime.GOOS)
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skipf("bubblewrap is not installed: %v", err)
+	}
+	if err := exec.Command("bwrap", "--ro-bind", "/", "/", "--unshare-net", "true").Run(); err != nil {
+		t.Skipf("this host cannot build a container namespace: %v", err)
+	}
 }
 
 // TestContainerRunsInsideTheNamespace is the ticket's done-when for the
