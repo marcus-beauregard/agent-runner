@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
@@ -99,8 +101,29 @@ func TestWorkRecordsBothOutcomes(t *testing.T) {
 	}
 }
 
-// TestReportCommand is the CLI half of the report: a recorded run prints, an id
-// that does not exist exits 1, and asking for nothing exits 1.
+// captureStdout runs fn with os.Stdout replaced by a pipe and returns what it
+// wrote, so a command whose whole job is printing is tested on its output, not
+// only on its exit code.
+func captureStdout(t *testing.T, fn func() int) (string, int) {
+	t.Helper()
+	old := os.Stdout
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = wr
+	code := fn()
+	wr.Close()
+	os.Stdout = old
+	out, err := io.ReadAll(rd)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	return string(out), code
+}
+
+// TestReportCommand is the CLI half of the report: a recorded run prints the
+// document, an id that does not exist exits 1, and asking for nothing exits 1.
 func TestReportCommand(t *testing.T) {
 	base := t.TempDir()
 	r, err := runrec.New(base, runrec.Meta{Kind: "build", Subject: "https://example.test/issues/33"})
@@ -110,8 +133,14 @@ func TestReportCommand(t *testing.T) {
 	if err := r.Finish(0); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if code := reportRun([]string{r.ID, "--run-dir", base}); code != 0 {
+	out, code := captureStdout(t, func() int { return reportRun([]string{r.ID, "--run-dir", base}) })
+	if code != 0 {
 		t.Errorf("report on a recorded run = %d, want 0", code)
+	}
+	for _, want := range []string{"# Run " + r.ID, "- State: done", "## Left to do"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report printed without %q\n---\n%s", want, out)
+		}
 	}
 	if code := reportRun([]string{"20260101-000000.000000-nope", "--run-dir", base}); code != 1 {
 		t.Errorf("report on an unknown id = %d, want 1", code)

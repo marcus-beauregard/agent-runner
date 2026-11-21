@@ -3,6 +3,7 @@ package run
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,6 +189,106 @@ func TestRenderReportRejectsCorruptLine(t *testing.T) {
 	}
 	if _, err := RenderReport(r.Dir); err == nil {
 		t.Fatal("RenderReport read past a line that is not an event")
+	}
+}
+
+// TestRenderReportTerminalStateOwesWork is the failure this document exists to
+// prevent: a record that ended refused, needs_human or failed owes something by
+// definition, so "Left to do" must never print "Nothing" over a non-zero exit
+// code just because the event stream happens to look tidy.
+func TestRenderReportTerminalStateOwesWork(t *testing.T) {
+	for _, tc := range []struct {
+		code  int
+		state string
+	}{
+		{1, "failed"},
+		{3, "refused"},
+		{4, "needs_human"},
+	} {
+		r, _ := newTestRun(t)
+		if err := r.Finish(tc.code); err != nil {
+			t.Fatalf("Finish(%d): %v", tc.code, err)
+		}
+		b, err := RenderReport(r.Dir)
+		if err != nil {
+			t.Fatalf("RenderReport: %v", err)
+		}
+		got := string(b)
+		if !strings.Contains(got, "- State: "+tc.state) {
+			t.Errorf("header does not say %q\n---\n%s", tc.state, got)
+		}
+		left := got[strings.Index(got, "## Left to do"):]
+		if strings.Contains(left, "Nothing:") {
+			t.Errorf("exit %d rendered an empty Left to do\n---\n%s", tc.code, left)
+		}
+		if want := fmt.Sprintf("The record ended %s with exit code %d", tc.state, tc.code); !strings.Contains(left, want) {
+			t.Errorf("Left to do does not contain %q\n---\n%s", want, left)
+		}
+	}
+}
+
+// TestRenderReportDoneSaysNothing is the other side of the same rule: done is the
+// only state that may claim nothing is left.
+func TestRenderReportDoneSaysNothing(t *testing.T) {
+	r, _ := newTestRun(t)
+	appendEvent(t, r, "stage", "01-triage", stageData{Event: "start"})
+	appendEvent(t, r, "stage", "01-triage", stageData{Event: "finish", Hash: "sha256:aaa"})
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	left := string(b)[strings.Index(string(b), "## Left to do"):]
+	if !strings.Contains(left, "Nothing:") {
+		t.Errorf("a finished run does not say nothing is left\n---\n%s", left)
+	}
+	if strings.Contains(left, "01-triage") {
+		t.Errorf("Left to do names a finished stage\n---\n%s", left)
+	}
+}
+
+// TestRenderReportStageNamedOnlyByGates keeps the report from contradicting
+// itself: the stage section says no stage events were recorded, so "Left to do"
+// must not claim that stage started.
+func TestRenderReportStageNamedOnlyByGates(t *testing.T) {
+	r, _ := newTestRun(t)
+	appendEvent(t, r, "gate", "02-scope", gateData{Command: "go vet ./...", DurationMS: 30})
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	left := got[strings.Index(got, "## Left to do"):]
+	if strings.Contains(left, "started and never finished") {
+		t.Errorf("Left to do says a gate-only stage started\n---\n%s", left)
+	}
+	if !strings.Contains(left, "recorded no stage events") {
+		t.Errorf("Left to do does not note the missing stage events\n---\n%s", left)
+	}
+}
+
+// TestRenderReportUnattributedEvents is the stage-less case Event.Stage allows:
+// a gate that recorded no stage still ran, and dropping it would let the report
+// read as a pass.
+func TestRenderReportUnattributedEvents(t *testing.T) {
+	r, _ := newTestRun(t)
+	appendEvent(t, r, "gate", "", gateData{Command: "go test ./...", ExitCode: 1, DurationMS: 900})
+	appendEvent(t, r, "decision", "", decisionData{Question: "Ship it?"})
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		"| (unattributed) | go test ./... | 1 | 900ms |",
+		"Gate go test ./... failed with exit 1.",
+		"left a question open",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report does not contain %q\n---\n%s", want, got)
+		}
 	}
 }
 

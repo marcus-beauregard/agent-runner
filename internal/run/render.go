@@ -21,6 +21,12 @@ const (
 	kindDecision = "decision"
 )
 
+// stageUnattributed is where a gate or a decision that recorded no stage is
+// reported. Event.Stage is optional, and dropping such an event would hide the
+// only evidence that a gate ran — and silence can only make a report read more
+// reassuring than the record it came from.
+const stageUnattributed = "(unattributed)"
+
 // stageData is the payload of a stage event. "start" and "finish" are the two
 // phases §5 names, and hash is the output hash a finish carries — the only thing
 // in the record that says a stage produced what it was supposed to.
@@ -173,24 +179,26 @@ func collect(events []Event) ([]stageRow, []gateRow, error) {
 				s.hash = d.Hash
 			}
 		case kindGate:
-			if e.Stage == "" {
-				continue
+			stage := e.Stage
+			if stage == "" {
+				stage = stageUnattributed
 			}
 			var d gateData
 			if err := decodeData(e, &d); err != nil {
 				return nil, nil, err
 			}
-			index(e.Stage)
-			gates = append(gates, gateRow{stage: e.Stage, gateData: d})
+			index(stage)
+			gates = append(gates, gateRow{stage: stage, gateData: d})
 		case kindDecision:
-			if e.Stage == "" {
-				continue
+			stage := e.Stage
+			if stage == "" {
+				stage = stageUnattributed
 			}
 			var d decisionData
 			if err := decodeData(e, &d); err != nil {
 				return nil, nil, err
 			}
-			s := &stages[index(e.Stage)]
+			s := &stages[index(stage)]
 			s.decisions = append(s.decisions, d)
 		}
 	}
@@ -286,8 +294,14 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 	b.WriteString("## Left to do\n\n")
 	var items []string
 	for _, s := range stages {
-		if s.finished.IsZero() {
-			items = append(items, fmt.Sprintf("Stage %s started and never finished; resume from it.", s.name))
+		// A stage known only from a gate or a decision has no start to resume
+		// from; claiming it "started" would contradict the section above it.
+		if s.finished.IsZero() && s.name != stageUnattributed {
+			if s.started.IsZero() {
+				items = append(items, fmt.Sprintf("Stage %s recorded no stage events; its work cannot be confirmed from the record.", s.name))
+			} else {
+				items = append(items, fmt.Sprintf("Stage %s started and never finished; resume from it.", s.name))
+			}
 		}
 		for _, d := range s.decisions {
 			if d.Answer == "" {
@@ -303,11 +317,22 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 			items = append(items, fmt.Sprintf("Gate %s failed with exit %d.", g.Command, g.ExitCode))
 		}
 	}
-	if rec.State == stateRunning {
+	switch {
+	case rec.State == stateRunning:
 		items = append(items, "The record still says running: the run is resumable, not finished.")
+	case rec.State != "" && rec.State != stateDone:
+		// Only done owes nothing. A refused, needs_human or failed record with a
+		// tidy event stream still stopped early, and this section is the one a
+		// reader trusts to say so — it must never print "Nothing" over a
+		// non-zero exit code.
+		line := fmt.Sprintf("The record ended %s", rec.State)
+		if rec.ExitCode != nil {
+			line += fmt.Sprintf(" with exit code %d", *rec.ExitCode)
+		}
+		items = append(items, line+": the run stopped before it completed.")
 	}
 	if len(items) == 0 {
-		b.WriteString("Nothing: every stage that started finished, and every gate that ran passed.\n")
+		b.WriteString("Nothing: the record says done, every stage that started finished, and every gate that ran passed.\n")
 		return
 	}
 	for _, item := range items {

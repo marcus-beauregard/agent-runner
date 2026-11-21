@@ -162,7 +162,10 @@ func planAndPrint(ctx context.Context, ref, repo, gate string) int {
 
 // reportRun prints one recorded run as REPORT.md. It reads the record and
 // writes nothing, so it is safe to point at a run that is still going, at a
-// finished one, and at one a resumed process is holding open.
+// finished one, and at one a resumed process is holding open. It is a view of
+// the two files as they were read, not a snapshot of one instant: a stage that
+// finishes between the reads can sit under a header that still says running, so
+// render again rather than trust one mid-run render.
 func reportRun(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "agent-runner: report: exactly one run id is required")
