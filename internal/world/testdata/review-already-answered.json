@@ -1,0 +1,30 @@
+{
+  "subject": "https://github.com/example/runlog/pull/103",
+  "issue": {
+    "number": 90,
+    "title": "Add a --dry-run flag",
+    "state": "open",
+    "assignees": [],
+    "labels": ["enhancement"]
+  },
+  "pr": {
+    "number": 103,
+    "head_sha": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+    "base_sha": "7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a",
+    "draft": false,
+    "mergeable": "no",
+    "mergeable_state": "blocked",
+    "state": "open"
+  },
+  "reviews": [
+    {"id": 6301, "state": "CHANGES_REQUESTED", "author": "reviewer-jane"},
+    {"id": 6302, "state": "APPROVED", "author": "reviewer-jane"}
+  ],
+  "checks": [
+    {"id": 4601, "name": "build", "conclusion": "success", "status": "completed"}
+  ],
+  "comments": [
+    {"id": 33001, "author": "reviewer-jane", "created_at": "2026-11-19T08:00:00Z"},
+    {"id": 33002, "author": "marcus-beauregard", "created_at": "2026-11-19T08:20:00Z"}
+  ]
+}

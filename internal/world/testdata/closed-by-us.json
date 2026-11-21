@@ -1,0 +1,28 @@
+{
+  "subject": "https://github.com/example/runlog/pull/102",
+  "issue": {
+    "number": 89,
+    "title": "Rename the retry helper",
+    "state": "open",
+    "assignees": ["marcus-beauregard"],
+    "labels": []
+  },
+  "pr": {
+    "number": 102,
+    "head_sha": "2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e",
+    "base_sha": "8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b",
+    "draft": false,
+    "mergeable": "unknown",
+    "mergeable_state": "unknown",
+    "state": "closed"
+  },
+  "reviews": [
+    {"id": 5201, "state": "CHANGES_REQUESTED", "author": "reviewer-jane"}
+  ],
+  "checks": [
+    {"id": 4501, "name": "build", "conclusion": "failure", "status": "completed"}
+  ],
+  "comments": [
+    {"id": 32001, "author": "reviewer-jane", "created_at": "2026-11-17T14:02:00Z"}
+  ]
+}
