@@ -819,7 +819,7 @@ type refusalCase struct {
 	name     string
 	path     map[string]string // exactly the programs on PATH; nothing means none
 	code     string            // the code in the record, the report and the stream
-	reason   string            // a phrase the reason has to carry
+	reason   string            // the sentence every reader has to say, exactly
 	evidence map[string]string // key to the value it must hold; "" wants a non-empty one
 }
 
@@ -842,7 +842,7 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 			name:     "claimed by another",
 			path:     map[string]string{"gh": ghScript(ghClaimedIssue, 0)},
 			code:     "claimed-by-other",
-			reason:   "claimed by someone-else",
+			reason:   "issue is claimed by someone-else",
 			evidence: map[string]string{"assignees": "someone-else"},
 		},
 		{
@@ -897,8 +897,10 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 	if rec.Refusal.Where != "plan" {
 		t.Errorf("refusal stage = %q, want plan", rec.Refusal.Where)
 	}
-	if !strings.Contains(rec.Refusal.Reason, tc.reason) {
-		t.Errorf("refusal reason = %q, want it to carry %q", rec.Refusal.Reason, tc.reason)
+	// Exact, not a phrase: "the issue is not closed" carries "issue is closed"
+	// and says the opposite, so a substring is not a check on the words.
+	if rec.Refusal.Reason != tc.reason {
+		t.Errorf("refusal reason = %q, want %q", rec.Refusal.Reason, tc.reason)
 	}
 	checkEvidence(t, "record", rec.Refusal.Evidence, tc.evidence)
 
@@ -916,10 +918,20 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 	if !strings.Contains(string(out), "- Evidence:\n") {
 		t.Errorf("report has no evidence section:\n%s", out)
 	}
-	for key, value := range tc.evidence {
-		line := "  - " + key + ": "
-		if !strings.Contains(string(out), line+value) {
-			t.Errorf("report does not carry evidence %q:\n%s", line+value, out)
+	for key := range tc.evidence {
+		// A case that cannot write the value down (an error from the host) still
+		// has one in the record, and the report has to print that one.
+		value := tc.evidence[key]
+		if value == "" {
+			value = rec.Refusal.Evidence[key]
+		}
+		if value == "" {
+			t.Errorf("evidence %q is empty in the record; the report cannot carry it", key)
+			continue
+		}
+		line := "  - " + key + ": " + value
+		if !strings.Contains(string(out), line) {
+			t.Errorf("report does not carry evidence %q:\n%s", line, out)
 		}
 	}
 
