@@ -19,10 +19,12 @@ import (
 // kept, because nothing else is needed to decide whether the next run has
 // anything to do.
 //
-// Kind is in the file as well as in the key, so a state file says what it is
-// without anyone having to guess it from a hash.
+// Kind and Subject are in the file as well as in the key, so a state file says
+// what it is — which verb, which thread — without anyone having to guess it from
+// a hash. That is what a migration or a person asking "what is this file" needs.
 type State struct {
 	Kind      string    `json:"kind"`
+	Subject   string    `json:"subject"`
 	Digest    string    `json:"digest"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -62,6 +64,9 @@ func LoadState(base, kind, subject string) (State, error) {
 	if s.Kind != kind {
 		return State{}, fmt.Errorf("parse state %s: kind %q, want %q", path, s.Kind, kind)
 	}
+	if s.Subject != subject {
+		return State{}, fmt.Errorf("parse state %s: subject %q, want %q", path, s.Subject, subject)
+	}
 	return s, nil
 }
 
@@ -74,6 +79,7 @@ func SaveState(base, kind, subject string, s State) error {
 		return fmt.Errorf("save state %s: empty digest", subject)
 	}
 	s.Kind = kind
+	s.Subject = subject
 	path, err := statePath(base, kind, subject)
 	if err != nil {
 		return err

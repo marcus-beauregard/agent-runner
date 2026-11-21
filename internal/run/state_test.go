@@ -66,6 +66,11 @@ func TestSaveLoadState(t *testing.T) {
 	if !got.UpdatedAt.Equal(want.UpdatedAt) {
 		t.Errorf("updated_at = %s, want %s", got.UpdatedAt, want.UpdatedAt)
 	}
+	// The file names the verb and the thread it belongs to, so it can be read
+	// without hashing candidate URLs to find out what it is.
+	if got.Kind != testKind || got.Subject != testSubject {
+		t.Errorf("state says kind %q subject %q, want %q %q", got.Kind, got.Subject, testKind, testSubject)
+	}
 	path, err := statePath(base, testKind, testSubject)
 	if err != nil {
 		t.Fatalf("statePath: %v", err)
@@ -129,6 +134,34 @@ func TestLoadStateCorrupt(t *testing.T) {
 	}
 	if _, err := Unchanged(base, testKind, testSubject, "abc"); err == nil {
 		t.Fatal("Unchanged on corrupt state = nil error, want the parse error")
+	}
+}
+
+// TestLoadStateMismatch: the file and its path must agree about the verb and the
+// thread. A file that says otherwise is damage, not a cache miss — reading past
+// it would let one kind's digest answer for another's work.
+func TestLoadStateMismatch(t *testing.T) {
+	cases := []struct{ name, kind, subject, body string }{
+		{"kind", testKind, testSubject, "{\"kind\":\"build\",\"subject\":\"" + testSubject + "\",\"digest\":\"x\"}"},
+		{"subject", testKind, testSubject, "{\"kind\":\"" + testKind + "\",\"subject\":\"https://example.test/issues/999\",\"digest\":\"x\"}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			path, err := statePath(base, tc.kind, tc.subject)
+			if err != nil {
+				t.Fatalf("statePath: %v", err)
+			}
+			if err := ensureDir(filepath.Dir(path)); err != nil {
+				t.Fatalf("ensureDir: %v", err)
+			}
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+			if _, err := LoadState(base, tc.kind, tc.subject); err == nil {
+				t.Fatalf("LoadState accepted a state file whose %s disagrees with its path", tc.name)
+			}
+		})
 	}
 }
 
