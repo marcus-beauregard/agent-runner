@@ -69,6 +69,10 @@ type stageRow struct {
 	finished  time.Time
 	hash      string
 	decisions []decisionData
+	// namelessStage marks the bucket when a stage event carried no stage name.
+	// Such an event names work nobody can attribute, so it is neither a stage
+	// section nor silently absent from what is left to do.
+	namelessStage bool
 }
 
 // gateRow is a gate result with the stage it ran in.
@@ -168,12 +172,17 @@ func collect(events []Event) ([]stageRow, []gateRow, error) {
 
 		switch e.Kind {
 		case kindStage:
-			if e.Stage == "" {
-				continue
-			}
 			var d stageData
 			if err := decodeData(e, &d); err != nil {
 				return nil, nil, err
+			}
+			if e.Stage == "" {
+				// A stage event with no name records work the report cannot
+				// attribute. Dropping it would let "Left to do" say nothing is
+				// owed over an event the record plainly holds, so the fact is
+				// kept in the bucket without inventing a stage for it.
+				stages[index("")].namelessStage = true
+				continue
 			}
 			s := &stages[index(e.Stage)]
 			switch d.Event {
@@ -250,6 +259,9 @@ func writeStage(b *strings.Builder, s stageRow) {
 		// finished or produced an output hash, so it gets a heading and the
 		// decisions it holds, and no stage lines that would imply otherwise.
 		b.WriteString("## Unattributed events\n\n")
+		if s.namelessStage {
+			b.WriteString("- A stage event recorded no stage name; it cannot be attributed or confirmed.\n")
+		}
 	} else {
 		fmt.Fprintf(b, "## %s\n\n", s.name)
 		switch {
@@ -300,6 +312,9 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 	b.WriteString("## Left to do\n\n")
 	var items []string
 	for _, s := range stages {
+		if s.name == "" && s.namelessStage {
+			items = append(items, "A stage event recorded no stage name; its work cannot be confirmed from the record.")
+		}
 		// A stage known only from a gate or a decision has no start to resume
 		// from; claiming it "started" would contradict the section above it.
 		// The unattributed bucket is not a stage, so it is never named as one.
@@ -347,6 +362,12 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 			line += fmt.Sprintf(" with exit code %d", *rec.ExitCode)
 		}
 		items = append(items, line+": the run stopped before it completed.")
+	case rec.ExitCode != nil && *rec.ExitCode != 0:
+		// State and exit code are two fields in run.json, not values this
+		// reader derives from each other. A record can say done and still carry
+		// a non-zero code, and "Nothing" over that pair is the same lie the
+		// cases above exist to prevent.
+		items = append(items, fmt.Sprintf("The record says done but exited with code %d; the run did not finish cleanly.", *rec.ExitCode))
 	}
 	if len(items) == 0 {
 		b.WriteString("Nothing: the record says done, every stage that started finished, and every gate that ran passed.\n")

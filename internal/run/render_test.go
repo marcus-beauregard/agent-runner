@@ -320,6 +320,55 @@ func TestRenderReportUnattributedGatePasses(t *testing.T) {
 	}
 }
 
+// TestRenderReportNamelessStageEvent covers the stage event the report used to
+// drop: no stage name means the work cannot be attributed, but the record still
+// holds it, so "Left to do" may not report nothing left.
+func TestRenderReportNamelessStageEvent(t *testing.T) {
+	r, _ := newTestRun(t)
+	appendEvent(t, r, "stage", "", stageData{Event: "start"})
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	if strings.Contains(got, "Nothing: the record says done") {
+		t.Errorf("report claims nothing is left over a dropped stage event\n---\n%s", got)
+	}
+	for _, want := range []string{
+		"## Unattributed events",
+		"A stage event recorded no stage name",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("report does not contain %q\n---\n%s", want, got)
+		}
+	}
+}
+
+// TestRenderReportDoneWithNonZeroExit: state and exit code are separate fields
+// in run.json, and the closing sentence must not survive a pair that disagrees.
+func TestRenderReportDoneWithNonZeroExit(t *testing.T) {
+	r, _ := newTestRun(t)
+	path := filepath.Join(r.Dir, "run.json")
+	rec := []byte("{\"id\":\"" + r.ID + "\",\"kind\":\"build\",\"state\":\"done\",\"exit_code\":2}")
+	if err := os.WriteFile(path, rec, 0o600); err != nil {
+		t.Fatalf("write run.json: %v", err)
+	}
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	if strings.Contains(got, "Nothing: the record says done") {
+		t.Errorf("report claims nothing is left over a non-zero exit code\n---\n%s", got)
+	}
+	if !strings.Contains(got, "exited with code 2") {
+		t.Errorf("report does not name the exit code it disagrees with\n---\n%s", got)
+	}
+}
+
 // TestRenderReportStatelessRecord: loadRecord accepts a run.json with no state,
 // and the report must not guess one. "The record says done" over a file that
 // says nothing is the same lie in a quieter form.
