@@ -198,8 +198,7 @@ func (r *Run) Finish(code int) error {
 // for needs_human (4), which exists to hand a tree with uncommitted work to a
 // person. A failure (1) or a refusal (3) can stop holding the same edits. A
 // --force removal there deletes the only copy. Those trees are collected by
-// age, in gc, which is where PRD §6.3 puts worktree removal — not at the end of
-// the run that made them.
+// age in gc; PRD §6.3 gives only a settled run the right to remove its own.
 func settledWork(code int) bool {
 	switch code {
 	case 0:
