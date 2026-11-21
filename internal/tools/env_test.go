@@ -250,9 +250,30 @@ func TestRedactArgv(t *testing.T) {
 
 // TestRegistryRecordsScrubbedEnv ties the two halves together: a registry
 // handed an environment runs commands with it and says so in the record, and
-// one that was not handed one still inherits.
+// one that was not handed one still inherits. The record alone would not carry
+// that: dropping `cmd.Env = r.env` from runCommand would leave the ledger
+// saying "scrubbed" while the child inherited everything, so the child is made
+// to report its own environment and the assertion is on what it saw.
 func TestRegistryRecordsScrubbedEnv(t *testing.T) {
-	env, err := Env(t.TempDir(), creds())
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in child is a shell script")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh(1) to build a stand-in child")
+	}
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "planted-secret")
+	// A cat that prints the environment it was handed. env(1) is not on the
+	// command allowlist — a run could dump its own gh token — so an allowed
+	// binary that reports what it saw is how the child gets a voice.
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "cat"), []byte("#!"+sh+"\nexec env\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	runDir := t.TempDir()
+	env, err := Env(runDir, creds())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,8 +281,16 @@ func TestRegistryRecordsScrubbedEnv(t *testing.T) {
 	led := &fakeLedger{}
 	scrubbed.SetLedger(led)
 	scrubbed.SetEnv(env)
-	if _, err := run(t, scrubbed, "ls -1"); err != nil {
+	out, err := run(t, scrubbed, "cat")
+	if err != nil {
 		t.Fatal(err)
+	}
+	child := envOf(strings.Split(strings.TrimSpace(out), "\n"))
+	if got, want := child["TMPDIR"], filepath.Join(runDir, "tmp"); got != want {
+		t.Fatalf("child TMPDIR = %q, want %q: the command did not run under Env", got, want)
+	}
+	if _, ok := child["AWS_SECRET_ACCESS_KEY"]; ok {
+		t.Fatal("the child inherited AWS_SECRET_ACCESS_KEY; SetEnv did not reach the process")
 	}
 	if entry, ok := led.events[0].data.(commandExit); !ok || entry.Env != scrubbedEnv {
 		t.Fatalf("recorded %T, want commandExit with env = %q", led.events[0].data, scrubbedEnv)
