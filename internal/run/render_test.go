@@ -284,10 +284,18 @@ func TestRenderReportUnattributedEvents(t *testing.T) {
 	for _, want := range []string{
 		"| (unattributed) | go test ./... | 1 | 900ms |",
 		"Gate go test ./... failed with exit 1.",
-		"left a question open",
+		"## Unattributed events",
+		"A decision recorded no stage and no answer",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("report does not contain %q\n---\n%s", want, got)
+		}
+	}
+	// The bucket is not a stage, so no line may present it as one. Without this
+	// the suite would enshrine the contradiction it is meant to catch.
+	for _, unwanted := range []string{"Stage (unattributed)", "- No stage events recorded beyond the name"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("report names the unattributed bucket as a stage: %q\n---\n%s", unwanted, got)
 		}
 	}
 }

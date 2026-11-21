@@ -245,19 +245,26 @@ func writeHeader(b *strings.Builder, rec *record) {
 // writeStage prints one stage: whether it started, whether it finished, the hash
 // it finished with, and the questions it recorded on the way.
 func writeStage(b *strings.Builder, s stageRow) {
-	fmt.Fprintf(b, "## %s\n\n", stageLabel(s.name))
-	switch {
-	case !s.started.IsZero() && !s.finished.IsZero():
-		fmt.Fprintf(b, "- Started: %s\n- Finished: %s\n", stamp(s.started), stamp(s.finished))
-	case !s.started.IsZero():
-		fmt.Fprintf(b, "- Started: %s\n- Finished: not yet\n", stamp(s.started))
-	case !s.finished.IsZero():
-		fmt.Fprintf(b, "- Started: not recorded\n- Finished: %s\n", stamp(s.finished))
-	default:
-		b.WriteString("- No stage events recorded beyond the name\n")
-	}
-	if s.hash != "" {
-		fmt.Fprintf(b, "- Output hash: %s\n", s.hash)
+	if s.name == "" {
+		// The unattributed bucket is not a stage: nothing in it started,
+		// finished or produced an output hash, so it gets a heading and the
+		// decisions it holds, and no stage lines that would imply otherwise.
+		b.WriteString("## Unattributed events\n\n")
+	} else {
+		fmt.Fprintf(b, "## %s\n\n", s.name)
+		switch {
+		case !s.started.IsZero() && !s.finished.IsZero():
+			fmt.Fprintf(b, "- Started: %s\n- Finished: %s\n", stamp(s.started), stamp(s.finished))
+		case !s.started.IsZero():
+			fmt.Fprintf(b, "- Started: %s\n- Finished: not yet\n", stamp(s.started))
+		case !s.finished.IsZero():
+			fmt.Fprintf(b, "- Started: not recorded\n- Finished: %s\n", stamp(s.finished))
+		default:
+			b.WriteString("- No stage events recorded beyond the name\n")
+		}
+		if s.hash != "" {
+			fmt.Fprintf(b, "- Output hash: %s\n", s.hash)
+		}
 	}
 	for _, d := range s.decisions {
 		if d.Answer == "" {
@@ -304,9 +311,14 @@ func writeLeft(b *strings.Builder, rec *record, stages []stageRow, gates []gateR
 			}
 		}
 		for _, d := range s.decisions {
-			if d.Answer == "" {
-				items = append(items, fmt.Sprintf("Stage %s left a question open: %q", stageLabel(s.name), d.Question))
+			if d.Answer != "" {
+				continue
 			}
+			if s.name == "" {
+				items = append(items, fmt.Sprintf("A decision recorded no stage and no answer: %q", d.Question))
+				continue
+			}
+			items = append(items, fmt.Sprintf("Stage %s left a question open: %q", s.name, d.Question))
 		}
 	}
 	for _, g := range gates {
