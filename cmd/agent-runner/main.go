@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
 
 	"github.com/marcus-beauregard/agent-runner/internal/agent"
+	"github.com/marcus-beauregard/agent-runner/internal/audit"
 	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
@@ -77,7 +79,7 @@ func runAgent(ctx context.Context, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	result, err := agent.Run(ctx, task, agent.MockLLM{}, agent.Options{}, registry)
+	result, err := runAudited(ctx, wd, task, agent.MockLLM{}, registry)
 	if err != nil {
 		return fail(err)
 	}
@@ -95,6 +97,92 @@ func runAgent(ctx context.Context, args []string) int {
 		return fail(fmt.Errorf("%w: agent stopped at the step cap", report.ErrNeedsHuman))
 	}
 	return 0
+}
+
+// runAudited runs the loop with the host audited around it. The audit watches
+// the machine, not the checkout (PRD §6.2): wd is where the run is supposed to
+// write and is excluded, so anything else that moves while the loop runs is
+// drift, and the run refuses rather than reporting a clean result over it.
+func runAudited(ctx context.Context, wd, task string, llm agent.LLM, toolset agent.Toolset) (agent.Result, error) {
+	before, err := snapshotHost(wd)
+	if err != nil {
+		return agent.Result{}, err
+	}
+	result, runErr := agent.Run(ctx, task, llm, agent.Options{}, toolset)
+	after, err := snapshotHost(wd)
+	if err != nil {
+		return agent.Result{}, err
+	}
+	drift := audit.Compare(before, after)
+	if len(drift) == 0 {
+		return result, runErr
+	}
+	// The machine moving is the news the caller has to act on, so the refusal
+	// wins over whatever the loop was about to say. The loop's own error, if it
+	// had one, goes into the evidence instead of being dropped on the floor.
+	return result, refuseDrift(drift, runErr)
+}
+
+// snapshotHost records every place a run must leave alone. runDir is the run's
+// working directory, excluded together with everything under it; repo is the
+// checkout it belongs to, passed to the watchlist so the one repository path
+// the audit excuses is the .git/worktrees bookkeeping that `git worktree add` writes.
+func snapshotHost(runDir string) (audit.Snapshot, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("locate home directory: %w", err)
+	}
+	stateBase, err := runrec.StateBase()
+	if err != nil {
+		return nil, err
+	}
+	repo := repoRoot(runDir)
+	snap, err := audit.Take(audit.Watchlist(home, repo), audit.Ignores(home, stateBase, runDir, repo))
+	if err != nil {
+		return nil, err
+	}
+	// Take skips a root an ignore already covers without a word. A watchlist
+	// that was excluded in full would then report no drift on nothing watched,
+	// which is the shape of bug that made #54 split in the first place, so say
+	// it instead of auditing an empty host.
+	if len(snap) == 0 {
+		return nil, errors.New("audit: every watchlist root was excluded; nothing was watched")
+	}
+	return snap, nil
+}
+
+// repoRoot is the checkout dir belongs to, or "" when it is not inside one.
+// A run outside a repository has no parent bookkeeping to watch, and git
+// failing to answer is that case rather than an error worth stopping for.
+func repoRoot(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// refuseDrift prints one line per drifted path and returns the refusal naming
+// the audit as its stage. The paths are on stderr because that is the part a
+// person acts on; the same paths go into the evidence with what moved, so a
+// record of the run can be checked against them.
+func refuseDrift(drift []audit.Drift, cause error) *refuse.Refusal {
+	evidence := make(map[string]string, len(drift)+1)
+	for _, d := range drift {
+		what := d.Kind
+		if d.Detail != "" {
+			what += ": " + d.Detail
+		}
+		fmt.Fprintf(os.Stderr, "agent-runner: drift: %s (%s)\n", d.Path, what)
+		evidence[d.Path] = what
+	}
+	if cause != nil {
+		evidence["agent"] = cause.Error()
+	}
+	r := refuse.New(refuse.OutsideRunDir, "audit",
+		fmt.Sprintf("%d path(s) outside the run directory changed during the run", len(drift)))
+	r.Evidence = evidence
+	return r
 }
 
 // work runs the M0 dry-run: it plans the change and prints the gate it would

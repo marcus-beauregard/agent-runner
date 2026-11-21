@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,7 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marcus-beauregard/agent-runner/internal/agent"
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
+	"github.com/marcus-beauregard/agent-runner/internal/report"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
+	"github.com/marcus-beauregard/agent-runner/internal/tools"
 	"github.com/marcus-beauregard/agent-runner/internal/world"
 )
 
@@ -147,6 +152,140 @@ func captureStdout(t *testing.T, fn func() int) (string, int) {
 		t.Fatalf("read captured stdout: %v", err)
 	}
 	return string(out), code
+}
+
+// captureStderr is captureStdout's twin, for the lines a refusal prints where
+// a person will read them. Both replace the file the process writes to, so the
+// command under test stays unaware of the capture.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = wr
+	fn()
+	wr.Close()
+	os.Stderr = old
+	out, err := io.ReadAll(rd)
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	return string(out)
+}
+
+// inDir runs the rest of the test from dir, then puts the working directory
+// back. run() takes no directory argument — the process cwd is what a test has
+// to move — so the restore is a cleanup rather than a defer, to survive a
+// failing assertion.
+func inDir(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir %s: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatalf("chdir back to %s: %v", old, err)
+		}
+	})
+}
+
+// writingLLM is a model that writes a file before it answers. It hands the loop
+// the one thing the toolset refuses — a write outside the working directory —
+// so the audit is what has to catch it.
+type writingLLM struct {
+	path string
+}
+
+var _ agent.LLM = writingLLM{}
+
+func (w writingLLM) Complete(ctx context.Context, prompt string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(w.path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(w.path, []byte("escape\n"), 0o600); err != nil {
+		return "", err
+	}
+	return "DONE", nil
+}
+
+// TestRunRefusesAHostWrite is #85 at the loop: a write outside the run directory
+// is refused, named on stderr, and exits 3 — not printed as a successful run
+// with an escape file left behind it.
+func TestRunRefusesAHostWrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wd := t.TempDir()
+	registry, err := tools.New(wd)
+	if err != nil {
+		t.Fatalf("tools.New: %v", err)
+	}
+	// A real home already has ~/.config; without it the audit would name the
+	// directory that appeared rather than the file written inside it, which is
+	// a different (and shallower) finding than the escape being tested.
+	if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+		t.Fatalf("prepare home: %v", err)
+	}
+	escape := filepath.Join(home, ".config", "agent-runner-escape")
+
+	var got error
+	stderr := captureStderr(t, func() {
+		_, got = runAudited(context.Background(), wd, "tidy up", writingLLM{path: escape}, registry)
+	})
+	if got == nil {
+		t.Fatal("the run reported success after a write outside its directory")
+	}
+	var refusal *refuse.Refusal
+	if !errors.As(got, &refusal) {
+		t.Fatalf("error = %v, want a *refuse.Refusal", got)
+	}
+	if refusal.Code != refuse.OutsideRunDir {
+		t.Errorf("refusal code = %q, want %q", refusal.Code, refuse.OutsideRunDir)
+	}
+	if refusal.Where != "audit" {
+		t.Errorf("refusal stage = %q, want audit", refusal.Where)
+	}
+	if code := report.ExitCode(got); code != 3 {
+		t.Errorf("exit code = %d, want 3", code)
+	}
+	if !strings.Contains(stderr, escape) {
+		t.Errorf("stderr does not name %s:\n%s", escape, stderr)
+	}
+	if _, ok := refusal.Evidence[escape]; !ok {
+		t.Errorf("evidence does not carry %s: %v", escape, refusal.Evidence)
+	}
+}
+
+// TestCleanRunHasNoDrift is the other half: the same audit around a loop that
+// writes only where it should exits 0 and prints its result. The snapshot is
+// asserted non-empty too — an audit that watched nothing would pass the drift
+// check while proving nothing at all.
+func TestCleanRunHasNoDrift(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wd := t.TempDir()
+	inDir(t, wd)
+
+	snap, err := snapshotHost(wd)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if len(snap) == 0 {
+		t.Fatal("the audit watched nothing: every root was excluded")
+	}
+
+	out, code := captureStdout(t, func() int { return run([]string{"run", "list the files"}) })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "\"done\": true") {
+		t.Errorf("clean run did not report a finished result:\n%s", out)
+	}
 }
 
 // TestReportCommand is the CLI half of the report: a recorded run prints the

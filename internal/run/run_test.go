@@ -206,6 +206,28 @@ func TestNewResolvesBase(t *testing.T) {
 	})
 }
 
+// TestStateBaseIsWhereNewWrites pins the accessor the audit uses to exclude
+// this program's own records: if it ever stops agreeing with New, the
+// exclusion covers nothing and the audit flags every run it writes.
+func TestStateBaseIsWhereNewWrites(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	got, err := StateBase()
+	if err != nil {
+		t.Fatalf("StateBase: %v", err)
+	}
+	if got != base {
+		t.Errorf("StateBase = %q, want %q", got, base)
+	}
+	r, err := New("", Meta{Kind: "build"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if want := filepath.Join(got, "agent-runner", "runs"); !strings.HasPrefix(r.Dir, want+string(filepath.Separator)) {
+		t.Errorf("New wrote %q, outside StateBase %q", r.Dir, got)
+	}
+}
+
 // TestNewRefusesFileBase is the failure a caller can actually hit: the base
 // names something that is not a directory.
 func TestNewRefusesFileBase(t *testing.T) {
