@@ -820,7 +820,7 @@ type refusalCase struct {
 	path     map[string]string // exactly the programs on PATH; nothing means none
 	code     string            // the code in the record, the report and the stream
 	reason   string            // a phrase the reason has to carry
-	evidence map[string]string // key to the value it must hold; "" wants the key present
+	evidence map[string]string // key to the value it must hold; "" wants a non-empty one
 }
 
 // TestWorkRecordsWhyItRefused is the ticket's claim at the binary, one row per
@@ -882,6 +882,15 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 	if rec.Refusal == nil {
 		t.Fatal("no refusal recorded")
 	}
+	// The ticket's headline is "refusals exit 3", and run.json is where a reader
+	// goes to learn what a run did: a process code with no record behind it is a
+	// run whose directory lies about how it ended.
+	switch {
+	case rec.ExitCode == nil:
+		t.Error("record has no exit code, want 3")
+	case *rec.ExitCode != 3:
+		t.Errorf("record exit code = %d, want 3", *rec.ExitCode)
+	}
 	if rec.Refusal.Code != tc.code {
 		t.Errorf("refusal code = %q, want %q", rec.Refusal.Code, tc.code)
 	}
@@ -900,6 +909,17 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 	for _, want := range []string{"- Stage: plan", "- Code: " + tc.code, "- Reason: " + rec.Refusal.Reason} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("report does not carry %q:\n%s", want, out)
+		}
+	}
+	// The evidence is the part a reader checks the refusal against; a report that
+	// names the cause but not what it saw is a summary, not the refusal.
+	if !strings.Contains(string(out), "- Evidence:\n") {
+		t.Errorf("report has no evidence section:\n%s", out)
+	}
+	for key, value := range tc.evidence {
+		line := "  - " + key + ": "
+		if !strings.Contains(string(out), line+value) {
+			t.Errorf("report does not carry evidence %q:\n%s", line+value, out)
 		}
 	}
 
@@ -929,6 +949,8 @@ func checkEvidence(t *testing.T, where string, got, want map[string]string) {
 		switch {
 		case !ok:
 			t.Errorf("%s evidence has no %q: %v", where, key, got)
+		case have == "":
+			t.Errorf("%s evidence %s is empty, want the reason that was read", where, key)
 		case value != "" && have != value:
 			t.Errorf("%s evidence %s = %q, want %q", where, key, have, value)
 		}
