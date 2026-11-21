@@ -4,6 +4,7 @@
 package world
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -15,32 +16,32 @@ import (
 // answers it when there is one, and everything the pair carries that a decision
 // depends on.
 type World struct {
-	Subject  string    // the ref it was read from, verbatim
-	Issue    Issue     // never the zero value: every thread has an issue
-	PR       PR        // the zero value when the ref is an issue with no pull request
-	Reviews  []Review  // sorted by ID
-	Checks   []Check   // sorted by Name, ties by ID
-	Comments []Comment // sorted by ID
+	Subject  string    `json:"subject"`  // the ref it was read from, verbatim
+	Issue    Issue     `json:"issue"`    // never the zero value: every thread has an issue
+	PR       PR        `json:"pr"`       // the zero value when the ref is an issue with no pull request
+	Reviews  []Review  `json:"reviews"`  // sorted by ID
+	Checks   []Check   `json:"checks"`   // sorted by Name, ties by ID
+	Comments []Comment `json:"comments"` // sorted by ID
 }
 
 // Issue is the slice of an issue a decision needs.
 type Issue struct {
-	Number    int
-	Title     string
-	State     string
-	Assignees []string
-	Labels    []string
+	Number    int      `json:"number"`
+	Title     string   `json:"title"`
+	State     string   `json:"state"`
+	Assignees []string `json:"assignees"`
+	Labels    []string `json:"labels"`
 }
 
 // PR is the slice of a pull request a decision needs.
 type PR struct {
-	Number         int
-	HeadSHA        string
-	BaseSHA        string
-	Draft          bool
-	Mergeable      Mergeable
-	MergeableState string
-	State          string
+	Number         int       `json:"number"`
+	HeadSHA        string    `json:"head_sha"`
+	BaseSHA        string    `json:"base_sha"`
+	Draft          bool      `json:"draft"`
+	Mergeable      Mergeable `json:"mergeable"`
+	MergeableState string    `json:"mergeable_state"`
+	State          string    `json:"state"`
 }
 
 // Mergeable is GitHub's answer to whether the pull request can be merged, which
@@ -70,27 +71,56 @@ func (m Mergeable) String() string {
 	}
 }
 
+// MarshalJSON writes the state as its name. world.json is a record a person
+// reads as well as a replay input, and `"mergeable": 2` says nothing without
+// this file open beside it.
+func (m Mergeable) MarshalJSON() ([]byte, error) {
+	return json.Marshal(m.String())
+}
+
+// UnmarshalJSON accepts exactly the names MarshalJSON writes, so a snapshot
+// carrying anything else is an error rather than MergeableUnknown. The three
+// states are not interchangeable: unknown means GitHub has not decided, and a
+// damaged record must not be read as one.
+func (m *Mergeable) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("mergeable: %w", err)
+	}
+	switch s {
+	case "unknown":
+		*m = MergeableUnknown
+	case "no":
+		*m = MergeableNo
+	case "yes":
+		*m = MergeableYes
+	default:
+		return fmt.Errorf("mergeable: %q is not yes, no or unknown", s)
+	}
+	return nil
+}
+
 // Review is one review on the pull request.
 type Review struct {
-	ID     int64
-	State  string
-	Author string
+	ID     int64  `json:"id"`
+	State  string `json:"state"`
+	Author string `json:"author"`
 }
 
 // Check is one check run on the pull request's head commit.
 type Check struct {
-	ID         int64 // unique, and the tie-break when a name repeats
-	Name       string
-	Conclusion string
-	Status     string
+	ID         int64  `json:"id"` // unique, and the tie-break when a name repeats
+	Name       string `json:"name"`
+	Conclusion string `json:"conclusion"`
+	Status     string `json:"status"`
 }
 
 // Comment is one comment on the issue, which is also where a pull request's
 // conversation lives: both are issues to the API.
 type Comment struct {
-	ID        int64
-	Author    string
-	CreatedAt string
+	ID        int64  `json:"id"`
+	Author    string `json:"author"`
+	CreatedAt string `json:"created_at"`
 }
 
 // ParseRef turns a github.com issue or pull request URL into its owner, repo and

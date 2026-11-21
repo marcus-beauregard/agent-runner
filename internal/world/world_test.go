@@ -1,6 +1,7 @@
 package world
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -119,5 +120,57 @@ func TestParseRef(t *testing.T) {
 				t.Fatalf("ParseRef(%q) = %s/%s#%d, want %s/%s#%d", tc.ref, owner, repo, number, tc.owner, tc.repo, tc.number)
 			}
 		})
+	}
+}
+
+// TestWorldJSONWireFormat pins the names world.json carries. The snapshot is a
+// wire format read by replay and by people, so a Go field rename must not rename
+// a key, and the mergeable state is written as its name rather than its ordinal.
+func TestWorldJSONWireFormat(t *testing.T) {
+	w := World{
+		Subject: "https://github.com/marcus-beauregard/agent-runner/issues/20",
+		Issue:   Issue{Number: 20, Title: "the record", State: "open", Assignees: []string{"marcus-beauregard"}, Labels: []string{"record"}},
+		PR:      PR{Number: 40, HeadSHA: "aaa111", BaseSHA: "bbb222", Draft: true, Mergeable: MergeableYes, MergeableState: "clean", State: "open"},
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatalf("marshal World: %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("decode World: %v", err)
+	}
+	checkJSONKeys(t, b, "subject", "issue", "pr", "reviews", "checks", "comments")
+	checkJSONKeys(t, top["issue"], "number", "title", "state", "assignees", "labels")
+	checkJSONKeys(t, top["pr"], "number", "head_sha", "base_sha", "draft", "mergeable", "mergeable_state", "state")
+	var pr map[string]json.RawMessage
+	if err := json.Unmarshal(top["pr"], &pr); err != nil {
+		t.Fatalf("decode pr: %v", err)
+	}
+	var mergeable string
+	if err := json.Unmarshal(pr["mergeable"], &mergeable); err != nil {
+		t.Fatalf("mergeable is not a name: %v", err)
+	}
+	if mergeable != "yes" {
+		t.Errorf("mergeable = %q, want yes", mergeable)
+	}
+}
+
+// checkJSONKeys compares one encoded object's key set with the names the wire
+// format promises. Extra and missing keys are both failures: an extra key is a
+// field that joined the format without a decision.
+func checkJSONKeys(t *testing.T, raw []byte, want ...string) {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
+	}
+	if len(m) != len(want) {
+		t.Errorf("%s has %d keys, want %d", raw, len(m), len(want))
+	}
+	for _, k := range want {
+		if _, ok := m[k]; !ok {
+			t.Errorf("%s has no key %q", raw, k)
+		}
 	}
 }

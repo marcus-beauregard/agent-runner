@@ -157,9 +157,9 @@ type Start struct {
 //
 // When the two match it creates nothing — no run directory, no state write, no
 // model call — and the caller reports the unchanged status and exits 0. When
-// they differ, or when there is no state at all, it creates the run directory
-// and returns it; the caller records the digest with Remember once the run has
-// finished.
+// they differ, or when there is no state at all, it creates the run directory,
+// snapshots the World it decided on inside it, and returns it; the caller
+// records the digest with Remember once the run has finished.
 //
 // The comparison is the only thing a command is allowed to decide "whether" on
 // (PRD §12): no word in the thread is weighed here, only whether it changed.
@@ -183,6 +183,14 @@ func Begin(ctx context.Context, base string, meta Meta, fetch FetchFunc, exclude
 	r, err := New(base, meta)
 	if err != nil {
 		return Start{}, err
+	}
+	// Snapshot before returning, so no stage can record work against a
+	// decision nobody kept. If the snapshot cannot be written the run is a
+	// failure and the freshly created directory goes with it: a record that
+	// says running, with no World in it, is worse than no record at all.
+	if err := SaveWorld(r.Dir, w); err != nil {
+		os.RemoveAll(r.Dir)
+		return Start{}, fmt.Errorf("snapshot world: %w", err)
 	}
 	s.Run = r
 	return s, nil
