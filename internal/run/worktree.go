@@ -265,12 +265,12 @@ func worktreeListed(repo, path string) (bool, error) {
 // PRD §6.3 asks for, and it runs from Finish, which is the one place every
 // terminal path passes through.
 //
-// A run with no terminal state never reaches Finish: its tree is still the work
-// a resume continues, so it is left alone. That is also the answer to what
-// --force would otherwise discard — uncommitted edits exist in a run whose
-// process died, and that run is not cleaned here. A terminal run either
-// committed to its branch or had its work rejected by the gate; the tree is
-// scratch either way.
+// Only the codes whose work is settled reach here (settledWork in run.go): done,
+// where everything is on the branch, and gate-failed, where the gate rejected
+// it. A run with no terminal state is resumable and keeps its tree, and so does
+// a run that stopped holding edits — refused, failed, or waiting for a person —
+// because the two --force flags below would discard the only copy of them. gc
+// collects those by age (PRD §6.3).
 //
 // It is a no-op for a run that never got a worktree. The ledger decides that,
 // not the filesystem: a tree already removed by hand still needs its

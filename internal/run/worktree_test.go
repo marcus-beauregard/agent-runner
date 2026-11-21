@@ -348,6 +348,73 @@ func TestFinishRemovesRecordedWorktree(t *testing.T) {
 	}
 }
 
+// TestFinishKeepsWorktreeTheWorkIsNotSettled pins the other half of the cleanup
+// rule: a run that stopped with edits in hand keeps them. needs_human is the
+// case that matters — the tree is what the person is being asked to look at —
+// and a failure or a refusal can stop holding the same uncommitted work.
+func TestFinishKeepsWorktreeTheWorkIsNotSettled(t *testing.T) {
+	cases := []struct {
+		code  int
+		state string
+	}{
+		{1, stateFailed},
+		{3, stateRefused},
+		{4, stateNeedsHuman},
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			parent := worktreeParent(t)
+			r := newWorktreeRun(t, parent, cageSubject)
+			if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+				t.Fatalf("Worktree: %v", err)
+			}
+			wt := filepath.Join(r.Dir, "worktree")
+			halfDone := filepath.Join(wt, "half-done.txt")
+			writeTestFile(t, halfDone, "wip\n")
+
+			if err := r.Finish(tc.code); err != nil {
+				t.Fatalf("Finish(%d): %v", tc.code, err)
+			}
+			if _, err := os.Stat(halfDone); err != nil {
+				t.Errorf("cleanup discarded work a person was handed: %v", err)
+			}
+			if list := mustGit(t, parent, "worktree", "list", "--porcelain"); !strings.Contains(list, wt) {
+				t.Errorf("parent stopped registering %s, which still holds edits: %s", wt, list)
+			}
+			if events := readEvents(t, r.Dir); len(events) != 1 || events[0].Kind != kindWorktreeAdd {
+				t.Errorf("stream = %+v, want only %s", events, kindWorktreeAdd)
+			}
+			rec, err := loadRecord(r.Dir)
+			if err != nil {
+				t.Fatalf("load record: %v", err)
+			}
+			if rec.State != tc.state || rec.ExitCode == nil || *rec.ExitCode != tc.code {
+				t.Errorf("record state/exit = %q/%v, want %q/%d", rec.State, rec.ExitCode, tc.state, tc.code)
+			}
+		})
+	}
+}
+
+// TestFinishRemovesWorktreeOnDone covers the other settled code: the work is on
+// the branch, so the checkout is scratch and goes.
+func TestFinishRemovesWorktreeOnDone(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish(0): %v", err)
+	}
+	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("worktree still on disk after a finished run: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("parent still registers %s: %s", wt, list)
+	}
+}
+
 // TestFinishWithoutWorktreeRecordsNoStep keeps a dry run's stream empty. The
 // cleanup step is about a tree that exists; a run that was refused at triage
 // never had one.

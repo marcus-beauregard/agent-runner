@@ -141,10 +141,10 @@ func New(base string, meta Meta) (*Run, error) {
 // is correct, because it was never finished and remains resumable, and its
 // worktree is left exactly as the resume needs it.
 //
-// Finish then removes the run's worktree when one was recorded, which is why
-// cleanup happens on every terminal path and nowhere else. A cleanup that fails
-// rewrites the record as failed: the record must not say done over a parent
-// that still names a tree nobody owns.
+// Finish then removes the run's worktree when one was recorded and the work in
+// it is settled (settledWork). A cleanup that fails rewrites the record as
+// failed: the record must not say done over a parent that still names a tree
+// nobody owns.
 func (r *Run) Finish(code int) error {
 	rec, err := loadRecord(r.Dir)
 	if err != nil {
@@ -155,22 +155,43 @@ func (r *Run) Finish(code int) error {
 	if err := writeRecord(r.Dir, *rec); err != nil {
 		return err
 	}
-	// Cleanup is a step, not a background hope (PRD §6.3): the tree this run
-	// wrote in comes out on every terminal state, and the step is in the stream.
-	// A run with no terminal state never reaches Finish, so a resume still finds
-	// its work in progress.
-	if err := CleanupWorktree(r.Dir, code); err != nil {
-		// The run is not the state it just claimed: a parent still naming a tree
-		// nobody owns is a failure whatever the work itself achieved. Record that
-		// so run.json and the exit code agree, then say why.
-		failed := 1
-		rec.State, rec.ExitCode = stateFailed, &failed
-		if werr := writeRecord(r.Dir, *rec); werr != nil {
-			return fmt.Errorf("cleanup worktree: %w (recording the failure also failed: %v)", err, werr)
+	// Cleanup is a step, not a background hope (PRD §6.3), but only the codes
+	// whose work is settled take the tree with them. A run with no terminal
+	// state never reaches Finish, so a resume still finds its work in progress;
+	// a run that stopped with edits in hand keeps them for the person or the gc.
+	if settledWork(code) {
+		if err := CleanupWorktree(r.Dir, code); err != nil {
+			// The run is not the state it just claimed: a parent still naming a
+			// tree nobody owns is a failure whatever the work itself achieved.
+			// Record that so run.json and the exit code agree, then say why.
+			failed := 1
+			rec.State, rec.ExitCode = stateFailed, &failed
+			if werr := writeRecord(r.Dir, *rec); werr != nil {
+				return fmt.Errorf("cleanup worktree: %w (recording the failure also failed: %v)", err, werr)
+			}
+			return fmt.Errorf("cleanup worktree: %w", err)
 		}
-		return fmt.Errorf("cleanup worktree: %w", err)
 	}
 	return nil
+}
+
+// settledWork reports whether a terminal exit code leaves a checkout that is
+// only scratch. 0 finished with its work on the branch, and 2 had that work
+// rejected by the gate: in both cases the checkout is regenerable from the
+// branch, which cleanup never deletes.
+//
+// 1, 3 and 4 are not settled. needs_human exists to hand a tree with
+// uncommitted work to a person, and a failure or a refusal can stop with the
+// same edits in hand — a --force removal there deletes the only copy. Those
+// trees are collected by age, in gc, which is where PRD §6.3 puts worktree
+// removal — not at the end of the run that made them.
+func settledWork(code int) bool {
+	switch code {
+	case 0, 2:
+		return true
+	default:
+		return false
+	}
 }
 
 // terminalState names the outcome an exit code stands for. Budget exhaustion is
