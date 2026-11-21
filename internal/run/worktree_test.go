@@ -291,10 +291,10 @@ func TestWorktreeRecordsAdd(t *testing.T) {
 	}
 }
 
-// TestFinishRemovesRecordedWorktree is the ticket's done-when: a run that fails
-// at the gate leaves no registration behind and both steps in the stream. The
-// tree is dirty on purpose — cleanup is what discards it, and a single --force
-// would refuse a tree with uncommitted work.
+// TestFinishRemovesRecordedWorktree is the ticket's done-when for a finished
+// run: no registration behind and both steps in the stream. The tree is dirty
+// on purpose — cleanup is what discards it, and a single --force would refuse a
+// tree with uncommitted work. It is scratch because the work is on the branch.
 func TestFinishRemovesRecordedWorktree(t *testing.T) {
 	parent := worktreeParent(t)
 	r := newWorktreeRun(t, parent, cageSubject)
@@ -305,8 +305,8 @@ func TestFinishRemovesRecordedWorktree(t *testing.T) {
 	wt := filepath.Join(r.Dir, "worktree")
 	writeTestFile(t, filepath.Join(wt, "half-done.txt"), "wip\n")
 
-	if err := r.Finish(2); err != nil {
-		t.Fatalf("Finish(2): %v", err)
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish(0): %v", err)
 	}
 	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("worktree still on disk after Finish: %v", err)
@@ -335,29 +335,32 @@ func TestFinishRemovesRecordedWorktree(t *testing.T) {
 	if err := json.Unmarshal(remove.Data, &rem); err != nil {
 		t.Fatalf("decode %s: %v", kindWorktreeRemove, err)
 	}
-	if rem.Path != wt || rem.ExitCode != 2 || rem.Error != "" {
-		t.Errorf("remove = %+v, want path %s, exit 2, no error", rem, wt)
+	if rem.Path != wt || rem.ExitCode != 0 || rem.Error != "" {
+		t.Errorf("remove = %+v, want path %s, exit 0, no error", rem, wt)
 	}
 
 	rec, err := loadRecord(r.Dir)
 	if err != nil {
 		t.Fatalf("load record: %v", err)
 	}
-	if rec.State != stateFailed || rec.ExitCode == nil || *rec.ExitCode != 2 {
-		t.Errorf("record state/exit = %q/%v, want failed/2", rec.State, rec.ExitCode)
+	if rec.State != stateDone || rec.ExitCode == nil || *rec.ExitCode != 0 {
+		t.Errorf("record state/exit = %q/%v, want done/0", rec.State, rec.ExitCode)
 	}
 }
 
 // TestFinishKeepsWorktreeTheWorkIsNotSettled pins the other half of the cleanup
-// rule: a run that stopped with edits in hand keeps them. needs_human is the
-// case that matters — the tree is what the person is being asked to look at —
-// and a failure or a refusal can stop holding the same uncommitted work.
+// rule: a run that stopped with edits in hand keeps them. The gate refusing the
+// work (2) is the case that is easy to get wrong — it runs before the commit
+// stage, so the tree is the only copy of what was attempted and of why it was
+// refused, not something regenerable from the branch. needs_human (4) is the
+// same shape, and a failure or a refusal can stop holding the same edits.
 func TestFinishKeepsWorktreeTheWorkIsNotSettled(t *testing.T) {
 	cases := []struct {
 		code  int
 		state string
 	}{
 		{1, stateFailed},
+		{2, stateFailed},
 		{3, stateRefused},
 		{4, stateNeedsHuman},
 	}
@@ -392,26 +395,6 @@ func TestFinishKeepsWorktreeTheWorkIsNotSettled(t *testing.T) {
 				t.Errorf("record state/exit = %q/%v, want %q/%d", rec.State, rec.ExitCode, tc.state, tc.code)
 			}
 		})
-	}
-}
-
-// TestFinishRemovesWorktreeOnDone covers the other settled code: the work is on
-// the branch, so the checkout is scratch and goes.
-func TestFinishRemovesWorktreeOnDone(t *testing.T) {
-	parent := worktreeParent(t)
-	r := newWorktreeRun(t, parent, cageSubject)
-	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
-		t.Fatalf("Worktree: %v", err)
-	}
-	wt := filepath.Join(r.Dir, "worktree")
-	if err := r.Finish(0); err != nil {
-		t.Fatalf("Finish(0): %v", err)
-	}
-	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("worktree still on disk after a finished run: %v", err)
-	}
-	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
-		t.Errorf("parent still registers %s: %s", wt, list)
 	}
 }
 

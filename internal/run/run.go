@@ -176,18 +176,20 @@ func (r *Run) Finish(code int) error {
 }
 
 // settledWork reports whether a terminal exit code leaves a checkout that is
-// only scratch. 0 finished with its work on the branch, and 2 had that work
-// rejected by the gate: in both cases the checkout is regenerable from the
-// branch, which cleanup never deletes.
+// only scratch. 0 finished with its work on the branch, so the checkout is
+// regenerable from it and cleanup can delete it.
 //
-// 1, 3 and 4 are not settled. needs_human exists to hand a tree with
-// uncommitted work to a person, and a failure or a refusal can stop with the
-// same edits in hand — a --force removal there deletes the only copy. Those
-// trees are collected by age, in gc, which is where PRD §6.3 puts worktree
-// removal — not at the end of the run that made them.
+// 1, 2, 3 and 4 are not settled. The gate runs before the commit stage, so the
+// work a run had refused (2) never reached the branch: that tree holds the only
+// copy of the attempted change and of why it was refused, exactly as it does
+// for needs_human (4), which exists to hand a tree with uncommitted work to a
+// person. A failure (1) or a refusal (3) can stop holding the same edits. A
+// --force removal there deletes the only copy. Those trees are collected by
+// age, in gc, which is where PRD §6.3 puts worktree removal — not at the end of
+// the run that made them.
 func settledWork(code int) bool {
 	switch code {
-	case 0, 2:
+	case 0:
 		return true
 	default:
 		return false
