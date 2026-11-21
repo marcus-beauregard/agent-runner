@@ -137,6 +137,16 @@ func runAudited(ctx context.Context, wd, task string, llm agent.LLM, toolset age
 // That is a narrowing of the claim, not a silent exclusion — the audit never
 // says it watched a repository when the whole of it was the run's to write.
 func snapshotHost(runDir string) (audit.Snapshot, error) {
+	// os.Getwd keeps the spelling the caller walked through, and git prints the
+	// physical one. Two spellings for one directory would put the checkout's
+	// walk on the physical path and the ignore on the typed one, and the run's
+	// own writes would come back as drift on a clean run. Resolve once and use
+	// that path for both.
+	resolved, err := filepath.EvalSymlinks(runDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve run directory %s: %w", runDir, err)
+	}
+	runDir = resolved
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("locate home directory: %w", err)
@@ -166,10 +176,10 @@ func snapshotHost(runDir string) (audit.Snapshot, error) {
 	return snap, nil
 }
 
-// sameDir reports whether two paths name the same directory. git prints the
-// physical path, which can differ from the one os.Getwd returns through a
-// symlink; comparing the strings would then watch a repository that the run
-// has already excluded under its other name.
+// sameDir reports whether two paths name the same directory. snapshotHost has
+// already resolved the run directory, so this is the belt to that braces: git
+// may still print the checkout in a spelling of its own, and a repository the
+// run has already excluded under another name must not be watched again.
 func sameDir(a, b string) bool {
 	ai, err := os.Stat(a)
 	if err != nil {
@@ -189,12 +199,23 @@ func sameDir(a, b string) bool {
 func repoRoot(dir string) (string, error) {
 	var stderr strings.Builder
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	// The answer has to be about dir, so the caller's git environment must not
+	// change it: GIT_CEILING_DIRECTORIES makes a directory inside a checkout
+	// answer "not a git repository", GIT_DIR answers for another tree entirely,
+	// and LC_ALL decides which sentence the answer arrives in — which the
+	// classification below reads.
+	cmd.Env = gitReadEnv()
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err == nil {
 		root := strings.TrimSpace(string(out))
 		if root == "" {
 			return "", fmt.Errorf("git rev-parse --show-toplevel in %s printed nothing", dir)
+		}
+		// A root that does not contain dir is an answer about somewhere else;
+		// watching it would report on a tree this run is not in.
+		if !contains(root, dir) {
+			return "", fmt.Errorf("git rev-parse --show-toplevel in %s printed %s, which does not contain it", dir, root)
 		}
 		return root, nil
 	}
@@ -210,6 +231,41 @@ func repoRoot(dir string) (string, error) {
 		return "", nil
 	}
 	return "", fmt.Errorf("git rev-parse --show-toplevel in %s: %v: %s", dir, err, msg)
+}
+
+// gitReadEnv is the environment for a read-only git question about a directory:
+// the caller's repository selection is removed and the locale is pinned, so the
+// answer is about dir on a host whose shell was set up some other way.
+func gitReadEnv() []string {
+	drop := []string{
+		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_COMMON_DIR=",
+		"GIT_CEILING_DIRECTORIES=", "GIT_DISCOVERY_ACROSS_FILESYSTEM=",
+		"LC_ALL=", "LC_MESSAGES=",
+	}
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		skip := false
+		for _, prefix := range drop {
+			if strings.HasPrefix(kv, prefix) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "LC_ALL=C")
+}
+
+// contains reports whether root is dir or one of its ancestors, by path
+// component, so /a/bc does not read as containing /a/b.
+func contains(root, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(dir))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // refuseDrift prints one line per drifted path and returns the refusal naming

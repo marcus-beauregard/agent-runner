@@ -382,6 +382,117 @@ func TestSnapshotAtTheRepositoryRootClaimsNoRepositoryWatch(t *testing.T) {
 	}
 }
 
+// TestSnapshotFollowsTheRunDirectoryThroughASymlink is the review's first
+// blocker: os.Getwd keeps the symlink the caller walked through while git
+// prints the physical path, so the ignore and the repository walk named one
+// directory two ways and the run's own writes came back as drift.
+func TestSnapshotFollowsTheRunDirectoryThroughASymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+	work := filepath.Join(repo, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(work, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	before, err := snapshotHost(link)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "scratch.txt"), []byte("mine\n"), 0o600); err != nil {
+		t.Fatalf("write in the run directory: %v", err)
+	}
+	stray := filepath.Join(repo, "stray.txt")
+	if err := os.WriteFile(stray, []byte("not mine\n"), 0o600); err != nil {
+		t.Fatalf("write beside the run directory: %v", err)
+	}
+	after, err := snapshotHost(link)
+	if err != nil {
+		t.Fatalf("snapshotHost: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, d := range audit.Compare(before, after) {
+		seen[d.Path] = true
+	}
+	if !seen[stray] {
+		t.Errorf("drift did not name %s: %v", stray, seen)
+	}
+	for path := range seen {
+		if path == work || strings.HasPrefix(path, work+string(filepath.Separator)) {
+			t.Errorf("the run's own write under %s was reported as drift: %v", work, seen)
+		}
+	}
+}
+
+// TestRepoRootIgnoresTheCallersGitEnvironment is the second blocker: an
+// exported GIT_DIR or GIT_CEILING_DIRECTORIES used to make a checkout inside
+// the repository answer "not a git repository", so the run reported clean over
+// a watch that was never established.
+func TestRepoRootIgnoresTheCallersGitEnvironment(t *testing.T) {
+	repo := gitRepo(t)
+	sub := filepath.Join(repo, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", repo)
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "elsewhere", ".git"))
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+
+	root, err := repoRoot(sub)
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	if !sameDir(root, repo) {
+		t.Errorf("repoRoot = %q, want %q", root, repo)
+	}
+}
+
+// TestRunAuditedInsideACheckout is the composition neither half-test covered:
+// the snapshots and the loop together in a real repository, where the run's own
+// write in its directory is not drift and a write beside it is a refusal.
+func TestRunAuditedInsideACheckout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := gitRepo(t)
+	runDir := filepath.Join(repo, "work")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	registry, err := tools.New(runDir)
+	if err != nil {
+		t.Fatalf("tools.New: %v", err)
+	}
+
+	t.Run("own write", func(t *testing.T) {
+		_, err := runAudited(context.Background(), runDir, "tidy up",
+			writingLLM{path: filepath.Join(runDir, "note.txt")}, registry)
+		if err != nil {
+			t.Fatalf("a write in the run directory was refused: %v", err)
+		}
+	})
+	t.Run("write beside it", func(t *testing.T) {
+		escape := filepath.Join(repo, "stray.txt")
+		var got error
+		captureStderr(t, func() {
+			_, got = runAudited(context.Background(), runDir, "tidy up", writingLLM{path: escape}, registry)
+		})
+		var refusal *refuse.Refusal
+		if !errors.As(got, &refusal) {
+			t.Fatalf("error = %v, want a *refuse.Refusal", got)
+		}
+		if refusal.Code != refuse.OutsideRunDir {
+			t.Errorf("refusal code = %q, want %q", refusal.Code, refuse.OutsideRunDir)
+		}
+		if _, ok := refusal.Evidence[escape]; !ok {
+			t.Errorf("evidence does not carry %s: %v", escape, refusal.Evidence)
+		}
+	})
+}
+
 // TestRepoRootTellsAbsenceFromFailure pins the distinction the review asked for:
 // git answering "not a repository" leaves nothing to watch, while git failing to
 // answer is a watch that was never established and has to stop the run rather
