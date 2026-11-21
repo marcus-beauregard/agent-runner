@@ -367,7 +367,7 @@ func work(ctx context.Context, args []string) int {
 	// the record claims the run was. A refusal that is not a refusal of this
 	// ticket's kind — a mode that does not exist — is a usage error and gets no
 	// record: nothing ran, and a record of nothing is noise.
-	_, warn, modeErr := sandbox.Resolve(ctx, *sandboxMode, sandbox.Detect)
+	mode, warn, modeErr := sandbox.Resolve(ctx, *sandboxMode, sandbox.Detect)
 	if modeErr != nil && !errors.Is(modeErr, report.ErrRefused) {
 		return fail(modeErr)
 	}
@@ -384,7 +384,10 @@ func work(ctx context.Context, args []string) int {
 		}
 		return code
 	}
-	r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo})
+	// The mode goes into the record as the mode, never as the request: a run
+	// that asked for auto and got worktree must not read as a container run in
+	// the one document a later person checks it against.
+	r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo, Sandbox: string(mode)})
 	if err != nil {
 		return fail(err)
 	}

@@ -59,6 +59,7 @@ type record struct {
 	ID       string `json:"id"`
 	Kind     string `json:"kind"`
 	Subject  string `json:"subject"`
+	Sandbox  string `json:"sandbox"`
 	State    string `json:"state"`
 	ExitCode *int   `json:"exit_code"`
 	Refusal  *struct {
@@ -684,10 +685,15 @@ func TestWorkSandboxFlag(t *testing.T) {
 		mode        string
 		wantCode    int
 		wantSt      string
+		wantSandbox string // the mode the record claims, empty when none was granted
 		wantRefusal string // the refusal code, empty when the run did not refuse
 	}{
 		{name: "container refused without a namespace", mode: "container", wantCode: 3, wantSt: "refused", wantRefusal: "sandbox-unavailable"},
-		{name: "worktree accepted", mode: "worktree", wantCode: 0, wantSt: "done"},
+		{name: "worktree accepted", mode: "worktree", wantCode: 0, wantSt: "done", wantSandbox: "worktree"},
+		// Auto is the case the record exists for: it asked for the strong mode
+		// and got the weak one, so the record must say what was granted rather
+		// than echo the request.
+		{name: "auto falls back to worktree", mode: "auto", wantCode: 0, wantSt: "done", wantSandbox: "worktree"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -701,6 +707,9 @@ func TestWorkSandboxFlag(t *testing.T) {
 			rec := onlyRun(t, base)
 			if rec.State != tc.wantSt {
 				t.Errorf("state = %q, want %q", rec.State, tc.wantSt)
+			}
+			if rec.Sandbox != tc.wantSandbox {
+				t.Errorf("sandbox = %q, want %q", rec.Sandbox, tc.wantSandbox)
 			}
 			if rec.ExitCode == nil || *rec.ExitCode != tc.wantCode {
 				t.Errorf("exit_code = %v, want %d", rec.ExitCode, tc.wantCode)
