@@ -908,16 +908,15 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 	if err != nil {
 		t.Fatalf("render report: %v", err)
 	}
-	// The heading and whole lines, not substrings: the report is a document, and
-	// a line that only starts with the right words is a different line.
-	if !strings.Contains(string(out), "## Refused\n") {
-		t.Fatalf("report has no Refused section:\n%s", out)
-	}
+	// The section, not the document: a line that matches somewhere else in the
+	// report says nothing about what the refusal section holds. Every line below
+	// has to be a whole line of that section.
+	section := reportSection(t, string(out), "## Refused")
 	want := []string{
-		"- Stage: plan\n",
-		"- Code: " + tc.code + "\n",
-		"- Reason: " + rec.Refusal.Reason + "\n",
-		"- Evidence:\n",
+		"- Stage: plan",
+		"- Code: " + tc.code,
+		"- Reason: " + rec.Refusal.Reason,
+		"- Evidence:",
 	}
 	// The evidence is the part a reader checks the refusal against; a report that
 	// names the cause but not what it saw is a summary, not the refusal.
@@ -935,11 +934,11 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 			t.Errorf("evidence %q is empty in the record; the report cannot carry it", key)
 			continue
 		}
-		want = append(want, "  - "+key+": "+value+"\n")
+		want = append(want, "  - "+key+": "+value)
 	}
 	for _, line := range want {
-		if !strings.Contains(string(out), line) {
-			t.Errorf("report does not carry %q:\n%s", line, out)
+		if !hasLine(section, line) {
+			t.Errorf("Refused section has no line %q:\n%s", line, section)
 		}
 	}
 
@@ -957,6 +956,38 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 		t.Errorf("refusal event reason = %q, want %q", events[0].Data.Reason, rec.Refusal.Reason)
 	}
 	checkEvidence(t, "refusal event", events[0].Data.Evidence, tc.evidence)
+	// The stream and the record are two copies of one refusal. A value the case
+	// cannot write down (the host's error) still has to be the same value in both,
+	// or following the stream reaches a different story than reading run.json.
+	for key := range tc.evidence {
+		if got, want := events[0].Data.Evidence[key], rec.Refusal.Evidence[key]; got != want {
+			t.Errorf("refusal event evidence %s = %q, record holds %q", key, got, want)
+		}
+	}
+}
+
+// reportSection returns the body of the report's section with the given heading,
+// up to the next heading.
+func reportSection(t *testing.T, doc, heading string) string {
+	t.Helper()
+	_, body, ok := strings.Cut(doc, heading+"\n")
+	if !ok {
+		t.Fatalf("report has no %q section:\n%s", heading, doc)
+	}
+	if next := strings.Index(body, "\n## "); next >= 0 {
+		body = body[:next]
+	}
+	return body
+}
+
+// hasLine reports whether section holds want as one whole line.
+func hasLine(section, want string) bool {
+	for _, line := range strings.Split(section, "\n") {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }
 
 // checkEvidence is the evidence half of a refusal assertion: every key the case
