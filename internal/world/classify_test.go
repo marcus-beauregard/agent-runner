@@ -212,6 +212,47 @@ func TestActions(t *testing.T) {
 			want: []Action{{TriggerID: "check:build:failure", Kind: kindFix}},
 		},
 		{
+			name: "an approval survives a later review that only comments",
+			self: ourLogin,
+			world: func() World {
+				w := openPR()
+				w.PR.Mergeable = MergeableYes
+				w.Reviews = []Review{
+					{ID: 1002, State: "APPROVED", Author: "bfs2021"},
+					{ID: 1010, State: "COMMENTED", Author: "bfs2021"},
+				}
+				w.Checks = []Check{{ID: 5, Name: "build", Status: "completed", Conclusion: "success"}}
+				// The remark arrives as a comment too; approval still ends the run.
+				w.Comments = []Comment{{ID: 2003, Author: "bfs2021"}}
+				return w
+			},
+		},
+		{
+			name: "changes requested stands after a later review that only comments",
+			self: ourLogin,
+			world: func() World {
+				w := openPR()
+				w.Reviews = []Review{
+					{ID: 1002, State: "CHANGES_REQUESTED", Author: "bfs2021"},
+					{ID: 1010, State: "COMMENTED", Author: "bfs2021"},
+				}
+				return w
+			},
+			want: []Action{{TriggerID: "review:1002:changes_requested", Kind: kindFix}},
+		},
+		{
+			name: "a dismissed review asks for nothing",
+			self: ourLogin,
+			world: func() World {
+				w := openPR()
+				w.Reviews = []Review{
+					{ID: 1002, State: "CHANGES_REQUESTED", Author: "bfs2021"},
+					{ID: 1006, State: "DISMISSED", Author: "bfs2021"},
+				}
+				return w
+			},
+		},
+		{
 			name: "several kinds at once come back sorted",
 			self: ourLogin,
 			world: func() World {

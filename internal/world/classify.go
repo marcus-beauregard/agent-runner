@@ -141,13 +141,27 @@ func (w World) settled(self string) bool {
 	return true
 }
 
-// latestReviews keeps each author's highest-id review, ordered by id. Reviews
-// arrive sorted, but this does not trust its input: a World built by hand in a
-// test, or filled by a reader that forgets, must still classify the same. Logins
-// compare case-insensitively, as GitHub does.
+// decisive reports whether a review carries a verdict about the pull request.
+// A review that only comments says nothing about approval, and a pending one is
+// a draft nobody else can see yet; neither takes back the word before it.
+func decisive(state string) bool {
+	return !strings.EqualFold(state, "COMMENTED") && !strings.EqualFold(state, "PENDING")
+}
+
+// latestReviews keeps each author's highest-id decisive review, ordered by id.
+//
+// A later review that only comments does not undo the verdict before it: GitHub
+// leaves reviewDecision at APPROVED or CHANGES_REQUESTED when the same author
+// comes back with remarks, and "approval ends the run" has to survive a
+// thank-you note. Reviews arrive sorted, but this does not trust its input: a
+// World built by hand in a test, or filled by a reader that forgets, must still
+// classify the same. Logins compare case-insensitively, as GitHub does.
 func latestReviews(rs []Review) []Review {
 	best := make(map[string]Review, len(rs))
 	for _, r := range rs {
+		if !decisive(r.State) {
+			continue
+		}
 		key := strings.ToLower(r.Author)
 		if cur, ok := best[key]; !ok || r.ID > cur.ID {
 			best[key] = r
