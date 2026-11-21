@@ -908,10 +908,16 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 	if err != nil {
 		t.Fatalf("render report: %v", err)
 	}
-	for _, want := range []string{"- Stage: plan", "- Code: " + tc.code, "- Reason: " + rec.Refusal.Reason} {
-		if !strings.Contains(string(out), want) {
-			t.Errorf("report does not carry %q:\n%s", want, out)
-		}
+	// The heading and whole lines, not substrings: the report is a document, and
+	// a line that only starts with the right words is a different line.
+	if !strings.Contains(string(out), "## Refused\n") {
+		t.Fatalf("report has no Refused section:\n%s", out)
+	}
+	want := []string{
+		"- Stage: plan\n",
+		"- Code: " + tc.code + "\n",
+		"- Reason: " + rec.Refusal.Reason + "\n",
+		"- Evidence:\n",
 	}
 	// The evidence is the part a reader checks the refusal against; a report that
 	// names the cause but not what it saw is a summary, not the refusal.
@@ -929,9 +935,11 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 			t.Errorf("evidence %q is empty in the record; the report cannot carry it", key)
 			continue
 		}
-		line := "  - " + key + ": " + value
+		want = append(want, "  - "+key+": "+value+"\n")
+	}
+	for _, line := range want {
 		if !strings.Contains(string(out), line) {
-			t.Errorf("report does not carry evidence %q:\n%s", line, out)
+			t.Errorf("report does not carry %q:\n%s", line, out)
 		}
 	}
 
