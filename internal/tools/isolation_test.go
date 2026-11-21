@@ -3,7 +3,6 @@ package tools
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -37,12 +36,7 @@ func containerRoots(t *testing.T) (root, runDir string) {
 // mount or an unwrapped command fails here. Only a host that cannot build a
 // namespace may skip, and the skip names the capability it lacked.
 func TestContainerRunsInsideTheNamespace(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skipf("bubblewrap is not installed: %v", err)
-	}
-	if err := exec.Command("bwrap", "--ro-bind", "/", "/", "--unshare-net", "true").Run(); err != nil {
-		t.Skipf("this host cannot build a container namespace: %v", err)
-	}
+	containerOrSkip(t)
 	root, runDir := containerRoots(t)
 	r, err := New(root)
 	if err != nil {

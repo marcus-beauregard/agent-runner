@@ -8,6 +8,19 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+      # The cage's fixtures are attacks on a real namespace, and a fixture that
+      # skips on every run is an attack test that never attacks. Ubuntu 24.04
+      # also restricts unprivileged user namespaces, so lift that where the
+      # knob exists.
+      - name: Install bubblewrap for the container fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # The fixture skips where no namespace can be built, so CI requires one:
+      # a green run here means the attack was exercised, not that it stood down.
+      - name: Prove the container namespace is available
+        run: bwrap --ro-bind / / --unshare-net true
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race ./...
