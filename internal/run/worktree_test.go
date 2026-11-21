@@ -76,6 +76,32 @@ func TestWorktreeCreatesOwnBranch(t *testing.T) {
 	}
 }
 
+// TestWorktreeBranchTracksNothing pins what cut from a remote-tracking ref used
+// to cost: agent/<slug> carries origin/main as its upstream, so the build
+// stage's plain `git push` lands on the default branch. The branch also has to
+// start where the record says it does, not wherever origin moved to since.
+func TestWorktreeBranchTracksNothing(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+
+	branch, base, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID))
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	for _, key := range []string{"remote", "merge"} {
+		if got, err := mustGitErr(parent, "config", "--get", "branch."+branch+"."+key); err == nil {
+			t.Errorf("branch.%s.%s = %q, want it unset", branch, key, got)
+		}
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	if got, err := mustGitErr(wt, "rev-parse", "--abbrev-ref", "@{u}"); err == nil {
+		t.Errorf("worktree upstream = %q, want none", got)
+	}
+	if got := mustGit(t, wt, "rev-parse", "HEAD"); got != base {
+		t.Errorf("branch is at %q, want the recorded base %q", got, base)
+	}
+}
+
 // TestWorktreesAreIndependent proves two runs on one subject cannot see each
 // other's writes, which is the whole point of not sharing a checkout.
 func TestWorktreesAreIndependent(t *testing.T) {

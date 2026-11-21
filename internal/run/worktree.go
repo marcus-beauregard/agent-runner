@@ -89,10 +89,15 @@ func idStamp(id string) string {
 }
 
 // Worktree gives a run its own checkout: <runDir>/worktree, on a new branch
-// agent/<slug> cut from the parent's origin default branch. The parent stays
-// the object store — git records the worktree in it and that registration is
-// the only thing that changes there — and the branch and the commit it was cut
-// from are recorded in run.json, which already carries both fields.
+// agent/<slug> cut from the commit origin's default branch points at. The
+// parent stays the object store — git records the worktree in it and that
+// registration is the only thing that changes there — and the branch and the
+// commit it was cut from are recorded in run.json, which already carries both
+// fields.
+//
+// The branch tracks nothing. A branch cut from origin/<default> inherits it as
+// its upstream, and the build stage's plain `git push` then goes to the default
+// branch.
 //
 // Every precondition failure is a refusal wrapping report.ErrRefused, so the
 // run exits 3 with a reason instead of leaving half a tree for the next run to
@@ -113,7 +118,7 @@ func Worktree(runDir, repo, slug string) (branch, baseSHA string, err error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", "", fmt.Errorf("stat worktree: %w", err)
 	}
-	base, defaultBranch, err := originBase(repo)
+	base, _, err := originBase(repo)
 	if err != nil {
 		return "", "", err
 	}
@@ -122,7 +127,10 @@ func Worktree(runDir, repo, slug string) (branch, baseSHA string, err error) {
 	}
 
 	branch = "agent/" + slug
-	if _, err := gitRun(repo, "worktree", "add", wt, "-b", branch, "origin/"+defaultBranch); err != nil {
+	// --no-track keeps the branch's upstream unset, and the resolved sha is the
+	// start point so the recorded BaseSHA is the commit the branch holds even
+	// if origin moves between the two git calls.
+	if _, err := gitRun(repo, "worktree", "add", "--no-track", wt, "-b", branch, base); err != nil {
 		return "", "", fmt.Errorf("add worktree: %w", err)
 	}
 	rec.Branch, rec.BaseSHA = branch, base
