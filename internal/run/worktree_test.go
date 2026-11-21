@@ -1,6 +1,7 @@
 package run
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -265,4 +266,167 @@ func writeTestFile(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestWorktreeRecordsAdd pins the first half of the recorded lifecycle: the
+// event is there, and it names the same tree the record and the branch do.
+func TestWorktreeRecordsAdd(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	branch, base, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID))
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	events := readEvents(t, r.Dir)
+	if len(events) != 1 || events[0].Kind != kindWorktreeAdd {
+		t.Fatalf("events = %+v, want exactly one %s", events, kindWorktreeAdd)
+	}
+	var ref WorktreeRef
+	if err := json.Unmarshal(events[0].Data, &ref); err != nil {
+		t.Fatalf("decode %s: %v", kindWorktreeAdd, err)
+	}
+	want := WorktreeRef{Path: filepath.Join(r.Dir, "worktree"), Branch: branch, BaseSHA: base}
+	if ref != want {
+		t.Errorf("ref = %+v, want %+v", ref, want)
+	}
+}
+
+// TestFinishRemovesRecordedWorktree is the ticket's done-when: a run that fails
+// at the gate leaves no registration behind and both steps in the stream. The
+// tree is dirty on purpose — cleanup is what discards it, and a single --force
+// would refuse a tree with uncommitted work.
+func TestFinishRemovesRecordedWorktree(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	branch, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID))
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	writeTestFile(t, filepath.Join(wt, "half-done.txt"), "wip\n")
+
+	if err := r.Finish(2); err != nil {
+		t.Fatalf("Finish(2): %v", err)
+	}
+	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("worktree still on disk after Finish: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("parent still registers %s:\n%s", wt, list)
+	}
+	if _, err := mustGitErr(parent, "rev-parse", "--verify", "refs/heads/"+branch); err != nil {
+		t.Errorf("cleanup deleted the branch: %v", err)
+	}
+
+	events := readEvents(t, r.Dir)
+	var add, remove *Event
+	for i := range events {
+		switch events[i].Kind {
+		case kindWorktreeAdd:
+			add = &events[i]
+		case kindWorktreeRemove:
+			remove = &events[i]
+		}
+	}
+	if add == nil || remove == nil {
+		t.Fatalf("stream = %+v, want both %s and %s", events, kindWorktreeAdd, kindWorktreeRemove)
+	}
+	var rem worktreeRemove
+	if err := json.Unmarshal(remove.Data, &rem); err != nil {
+		t.Fatalf("decode %s: %v", kindWorktreeRemove, err)
+	}
+	if rem.Path != wt || rem.ExitCode != 2 || rem.Error != "" {
+		t.Errorf("remove = %+v, want path %s, exit 2, no error", rem, wt)
+	}
+
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	if rec.State != stateFailed || rec.ExitCode == nil || *rec.ExitCode != 2 {
+		t.Errorf("record state/exit = %q/%v, want failed/2", rec.State, rec.ExitCode)
+	}
+}
+
+// TestFinishWithoutWorktreeRecordsNoStep keeps a dry run's stream empty. The
+// cleanup step is about a tree that exists; a run that was refused at triage
+// never had one.
+func TestFinishWithoutWorktreeRecordsNoStep(t *testing.T) {
+	r := newWorktreeRun(t, worktreeParent(t), cageSubject)
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish(0): %v", err)
+	}
+	if events := readEvents(t, r.Dir); len(events) != 0 {
+		t.Errorf("stream = %+v, want no events for a run that had no worktree", events)
+	}
+}
+
+// TestRemoveWorktreePrunesAStaleRegistration covers the tree deleted by hand:
+// the directory is gone, the parent still names it, and cleanup has to drop the
+// registration anyway.
+func TestRemoveWorktreePrunesAStaleRegistration(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveWorktree(r.Dir); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("parent still registers a tree that is gone:\n%s", list)
+	}
+}
+
+// TestRemoveWorktreeDropsALockedRegistration is the bug the handoff named:
+// prune exits 0 without dropping a locked entry, so the function must remove
+// the lock with the tree and then prove the list is clean.
+func TestRemoveWorktreeDropsALockedRegistration(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	mustGit(t, parent, "worktree", "lock", wt)
+	if err := RemoveWorktree(r.Dir); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("parent still registers a locked tree:\n%s", list)
+	}
+}
+
+// TestRequireCleanParentNamesABareParent keeps the refusal readable. A bare
+// parent has no work tree, and the old path reported that as git status
+// failing rather than as a shape the runner does not support.
+func TestRequireCleanParentNamesABareParent(t *testing.T) {
+	root := t.TempDir()
+	bare := filepath.Join(root, "bare.git")
+	mustGit(t, root, "init", "-q", "--bare", "--initial-branch=main", bare)
+	err := requireCleanParent(bare)
+	if !errors.Is(err, report.ErrRefused) {
+		t.Fatalf("requireCleanParent = %v, want a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "parent is bare") {
+		t.Errorf("error = %q, want it to say the parent is bare", err)
+	}
+}
+
+// readEvents returns the run's stream, failing on a torn or unparseable line:
+// a test that quietly read past damage would prove less than it claims.
+func readEvents(t *testing.T, runDir string) []Event {
+	t.Helper()
+	events, torn, err := readLedger(filepath.Join(runDir, "run.ndjson"))
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	if torn != "" {
+		t.Fatalf("ledger is torn: %s", torn)
+	}
+	return events
 }

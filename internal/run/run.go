@@ -138,7 +138,13 @@ func New(base string, meta Meta) (*Run, error) {
 // process that has already exited, which is state that lies.
 //
 // A run killed before Finish keeps the running state it was created with: that
-// is correct, because it was never finished and remains resumable.
+// is correct, because it was never finished and remains resumable, and its
+// worktree is left exactly as the resume needs it.
+//
+// Finish then removes the run's worktree when one was recorded, which is why
+// cleanup happens on every terminal path and nowhere else. A cleanup that fails
+// rewrites the record as failed: the record must not say done over a parent
+// that still names a tree nobody owns.
 func (r *Run) Finish(code int) error {
 	rec, err := loadRecord(r.Dir)
 	if err != nil {
@@ -146,7 +152,25 @@ func (r *Run) Finish(code int) error {
 	}
 	rec.State = terminalState(code)
 	rec.ExitCode = &code
-	return writeRecord(r.Dir, *rec)
+	if err := writeRecord(r.Dir, *rec); err != nil {
+		return err
+	}
+	// Cleanup is a step, not a background hope (PRD §6.3): the tree this run
+	// wrote in comes out on every terminal state, and the step is in the stream.
+	// A run with no terminal state never reaches Finish, so a resume still finds
+	// its work in progress.
+	if err := CleanupWorktree(r.Dir, code); err != nil {
+		// The run is not the state it just claimed: a parent still naming a tree
+		// nobody owns is a failure whatever the work itself achieved. Record that
+		// so run.json and the exit code agree, then say why.
+		failed := 1
+		rec.State, rec.ExitCode = stateFailed, &failed
+		if werr := writeRecord(r.Dir, *rec); werr != nil {
+			return fmt.Errorf("cleanup worktree: %w (recording the failure also failed: %v)", err, werr)
+		}
+		return fmt.Errorf("cleanup worktree: %w", err)
+	}
+	return nil
 }
 
 // terminalState names the outcome an exit code stands for. Budget exhaustion is
