@@ -164,7 +164,13 @@ func Worktree(runDir, repo, slug string) (branch, baseSHA string, err error) {
 	// The record names the tree before git creates it, and names the parent too:
 	// a kill between the two leaves a registration the record can find instead
 	// of a directory nobody owns, and RemoveWorktree has the repo it needs.
-	rec.Branch, rec.BaseSHA, rec.Worktree, rec.Repo = branch, base, wt, repo
+	// The parent is recorded the way the rest of the record is: absolute, so a
+	// resume from another directory resolves the same repository.
+	absRepo, err := filepath.Abs(repo)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve parent: %w", err)
+	}
+	rec.Branch, rec.BaseSHA, rec.Worktree, rec.Repo = branch, base, wt, absRepo
 	if err := writeRecord(runDir, *rec); err != nil {
 		return "", "", fmt.Errorf("record worktree: %w", err)
 	}
@@ -330,10 +336,25 @@ func CleanupWorktree(runDir string, code int) error {
 	// appends worktree:add, so a run killed between the two still names its
 	// tree here. Reading the event alone would call that run treeless and
 	// leave the checkout and its registration invisible forever.
-	if rec.Worktree == "" {
+	if rec.Worktree == "" && rec.Branch == "" {
 		return nil
 	}
+	// A record written before the field existed may still have a tree at the
+	// fixed location. RemoveWorktree takes that fallback; cleanup has to take
+	// the same path, or it finishes done over a live registration. The tree has
+	// to be there: with no field and no tree there is nothing this run can
+	// prove, and inventing a path would turn a record that never had a
+	// worktree into a failed cleanup.
 	wt := rec.Worktree
+	if wt == "" {
+		wt = filepath.Join(runDir, "worktree")
+		if _, err := os.Lstat(wt); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+	}
 	data := worktreeRemove{Path: wt, ExitCode: code}
 	// Settled is a claim about the tree, not about the exit code. The checkout
 	// is scratch only when everything in it is on the branch; a change that was

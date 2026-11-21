@@ -780,3 +780,115 @@ func TestFinishKeepsADetachedHeadWorktree(t *testing.T) {
 		t.Errorf("%s:precious.txt exists, so the test did not put the commit on no branch", branch)
 	}
 }
+
+// TestFinishCleansAWorktreeRecordedWithARelativeParent is the resume case: the
+// parent was handed to Worktree relative to one working directory, and Finish
+// runs in another. An absolute record is the only spelling both resolve.
+func TestFinishCleansAWorktreeRecordedWithARelativeParent(t *testing.T) {
+	parent := worktreeParent(t)
+	root := filepath.Dir(parent)
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, filepath.Base(parent), Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	// Finish somewhere that cannot resolve "parent" at all.
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	if !filepath.IsAbs(rec.Repo) {
+		t.Fatalf("recorded parent %q is not absolute: a resume from another directory cannot find it", rec.Repo)
+	}
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish(0): %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("worktree still on disk after Finish: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("parent still registers %s:\\n%s", wt, list)
+	}
+}
+
+// TestFinishCleansALegacyRecord covers a run.json written before the worktree
+// field existed: the branch and base are there, the tree is at the fixed
+// location, and the field is not. Cleanup must take the same fallback
+// RemoveWorktree does instead of finishing done over a live registration.
+func TestFinishCleansALegacyRecord(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	path := filepath.Join(r.Dir, "run.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatalf("decode record: %v", err)
+	}
+	delete(legacy, "worktree")
+	data, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("encode record: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish(0): %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("legacy record left its worktree on disk: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("legacy record left a registration behind:\\n%s", list)
+	}
+}
+
+// TestFinishKeepsAWorktreeOnAnotherBranch pins the second half of "settled": a
+// clean checkout whose head is not the run's branch holds commits the branch
+// does not, and removing it would strand them.
+func TestFinishKeepsAWorktreeOnAnotherBranch(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	mustGit(t, wt, "checkout", "-q", "-b", "somebody-elses-work")
+	writeTestFile(t, filepath.Join(wt, "theirs.txt"), "work\\n")
+	mustGit(t, wt, "add", ".")
+	mustGit(t, wt, "commit", "-q", "-m", "work on another branch")
+
+	err := r.Finish(0)
+	if err == nil {
+		t.Fatal("Finish(0) = nil, want the foreign branch to stop the cleanup")
+	}
+	if !strings.Contains(err.Error(), "somebody-elses-work") {
+		t.Errorf("error = %q, want it to name the branch the tree is on", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "theirs.txt")); err != nil {
+		t.Errorf("cleanup discarded work that is on no branch the run owns: %v", err)
+	}
+}
