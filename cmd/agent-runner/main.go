@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/marcus-beauregard/agent-runner/internal/agent"
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 	"github.com/marcus-beauregard/agent-runner/internal/sandbox"
@@ -149,7 +150,11 @@ func work(ctx context.Context, args []string) int {
 		if modeErr != nil {
 			return fail(modeErr)
 		}
-		return planAndPrint(ctx, ref, *repo, *gate)
+		code, planErr := planAndPrint(ctx, ref, *repo, *gate)
+		if planErr != nil {
+			fmt.Fprintf(os.Stderr, "agent-runner: %v\n", planErr)
+		}
+		return code
 	}
 	r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo})
 	if err != nil {
@@ -159,13 +164,24 @@ func work(ctx context.Context, args []string) int {
 	// A refusal is a finished run, so it gets a record with its own state rather
 	// than a directory that says running for a process that already exited.
 	if modeErr != nil {
+		if err := r.Refuse(refusalForMode(modeErr)); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+			return 1
+		}
 		if err := r.Finish(report.ExitCode(modeErr)); err != nil {
 			fmt.Fprintf(os.Stderr, "agent-runner: record run outcome: %v\n", err)
 			return 1
 		}
 		return fail(modeErr)
 	}
-	code := planAndPrint(ctx, ref, *repo, *gate)
+	code, planErr := planAndPrint(ctx, ref, *repo, *gate)
+	if err := recordRefusal(r, planErr); err != nil {
+		fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+		return 1
+	}
+	if planErr != nil {
+		fmt.Fprintf(os.Stderr, "agent-runner: %v\n", planErr)
+	}
 	if err := r.Finish(code); err != nil {
 		// The run happened; the record of how it ended did not. Say so instead of
 		// exiting on the result as though the record could be trusted.
@@ -175,16 +191,39 @@ func work(ctx context.Context, args []string) int {
 	return code
 }
 
-// planAndPrint plans the work, prints the plan, and returns the exit code for it.
-// Splitting it out lets the recorded path finalize its record whatever the
-// plan decided, refusals included.
-func planAndPrint(ctx context.Context, ref, repo, gate string) int {
+// planAndPrint plans the work, prints the plan, and returns the exit code for it
+// with the refusal behind it, if any. Splitting it out lets the recorded path
+// write the refusal into its record and finalize that record whatever the plan
+// decided.
+func planAndPrint(ctx context.Context, ref, repo, gate string) (int, error) {
 	plan, err := report.Work(ctx, ref, repo, gate)
 	fmt.Print(plan.String())
 	if err != nil {
-		return fail(err)
+		return report.ExitCode(err), err
 	}
-	return 0
+	return 0, nil
+}
+
+// recordRefusal writes the typed refusal behind err into the run record. Only a
+// *refuse.Refusal is recorded: an arbitrary error is not a refusal, and writing
+// one as if it were would put a code on something no vocabulary covers.
+func recordRefusal(r *runrec.Run, err error) error {
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		return nil
+	}
+	return r.Refuse(ref)
+}
+
+// refusalForMode types the sandbox refusal, which is decided before any stage
+// runs and so has no plan to refuse. The probe's own words are the reason: it
+// is the part an operator can act on.
+func refusalForMode(err error) *refuse.Refusal {
+	var unavailable sandbox.ErrUnavailable
+	if errors.As(err, &unavailable) {
+		return refuse.New(refuse.SandboxUnavailable, "sandbox", unavailable.Reason)
+	}
+	return refuse.New(refuse.SandboxUnavailable, "sandbox", err.Error())
 }
 
 // reportRun prints one recorded run as REPORT.md. It reads the record and

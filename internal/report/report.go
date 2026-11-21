@@ -9,12 +9,17 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
 // Sentinel errors map to exit codes via ExitCode.
 var (
 	ErrGateFailed = errors.New("gate failed")
-	ErrRefused    = errors.New("refused")
+	// ErrRefused is refuse.ErrRefused under this package's name: one sentinel,
+	// so a caller that checks either means the same thing, and a typed refusal
+	// maps to exit 3 wherever it was raised.
+	ErrRefused    = refuse.ErrRefused
 	ErrNeedsHuman = errors.New("needs a human")
 )
 
@@ -68,26 +73,37 @@ func (p Plan) String() string {
 // Work runs the M0 dry-run: read the issue with gh if it can, then produce a
 // plan. It writes nothing and creates no branch. A refusal — gh unavailable,
 // an unreadable issue, or one that is closed or already claimed — is returned
-// as an error wrapping ErrRefused, alongside the best plan we can still print.
+// as a typed *refuse.Refusal, alongside the best plan we can still print, so
+// the caller can record why the run stopped instead of only that it did.
 func Work(ctx context.Context, ref, repo, gate string) (Plan, error) {
 	plan := Plan{Ref: ref, Gate: gate}
 	gh, err := exec.LookPath("gh")
 	if err != nil {
 		plan.Scope = "(gh CLI unavailable)"
-		return plan, fmt.Errorf("%w: gh CLI not available: %v", ErrRefused, err)
+		refusal := refuse.New(refuse.ToolUnavailable, "plan", "gh CLI is not available")
+		refusal.Evidence = map[string]string{"error": err.Error()}
+		return plan, refusal
 	}
 	issue, err := fetchIssue(ctx, gh, ref)
 	if err != nil {
 		plan.Scope = "(issue could not be read)"
-		return plan, fmt.Errorf("%w: cannot read issue: %v", ErrRefused, err)
+		refusal := refuse.New(refuse.ToolUnavailable, "plan", "the issue could not be read")
+		refusal.Evidence = map[string]string{"gh": err.Error()}
+		return plan, refusal
 	}
 	plan.State = issue.State
 	plan.Scope = fmt.Sprintf("Resolve issue %s: %s", ref, issue.Title)
 	if !strings.EqualFold(issue.State, "OPEN") {
-		return plan, fmt.Errorf("%w: issue is %s", ErrRefused, strings.ToLower(issue.State))
+		refusal := refuse.New(refuse.IssueClosed, "plan",
+			fmt.Sprintf("issue is %s", strings.ToLower(issue.State)))
+		refusal.Evidence = map[string]string{"state": issue.State}
+		return plan, refusal
 	}
 	if len(issue.Assignees) > 0 {
-		return plan, fmt.Errorf("%w: issue already claimed by %s", ErrRefused, strings.Join(issue.Assignees, ", "))
+		refusal := refuse.New(refuse.ClaimedByOther, "plan",
+			fmt.Sprintf("issue is claimed by %s", strings.Join(issue.Assignees, ", ")))
+		refusal.Evidence = map[string]string{"assignees": strings.Join(issue.Assignees, ", ")}
+		return plan, refusal
 	}
 	return plan, nil
 }
