@@ -18,6 +18,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	// Alias, because worktree.go already has a helper named refuse: this
+	// package needs the vocabulary, not another way to spell an error.
+	refusal "github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
 // ErrNoRecord reports a directory that holds no usable run.json: the file is
@@ -84,6 +88,20 @@ type record struct {
 	Account  string `json:"account,omitempty"`
 	State    string `json:"state"`
 	ExitCode *int   `json:"exit_code"`
+	// Refusal is why the run stopped, omitted when it did not refuse. The state
+	// says refused; this says for what, and the report prints it. A record
+	// written before this section existed still reads, one without it.
+	Refusal *refusalRecord `json:"refusal,omitempty"`
+}
+
+// refusalRecord is the refusal section of run.json: the code from the closed
+// vocabulary, the stage that raised it, the one sentence a person reads, and
+// the evidence the sentence can be checked against.
+type refusalRecord struct {
+	Code     string            `json:"code"`
+	Where    string            `json:"where,omitempty"`
+	Reason   string            `json:"reason"`
+	Evidence map[string]string `json:"evidence,omitempty"`
 }
 
 // New creates <base>/agent-runner/runs/<id>/ with its stages/ subdirectory and
@@ -142,6 +160,31 @@ func New(base string, meta Meta) (*Run, error) {
 		return nil, err
 	}
 	return &Run{ID: id, Dir: dir}, nil
+}
+
+// Refuse records why the run stopped, before Finish writes its outcome. The
+// code is checked against the vocabulary: a record is the evidence a person or
+// a later run reads, and an unknown code in it would be a reason nobody can
+// name. Calling it after Finish is a mistake — Finish rewrites the whole record
+// and a refusal written after it would be a record of a run that already ended.
+func (r *Run) Refuse(ref *refusal.Refusal) error {
+	if ref == nil {
+		return errors.New("refuse: nil refusal")
+	}
+	if !refusal.Valid(ref.Code) {
+		return fmt.Errorf("refuse: unknown code %q", ref.Code)
+	}
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		return err
+	}
+	rec.Refusal = &refusalRecord{
+		Code:     string(ref.Code),
+		Where:    ref.Where,
+		Reason:   ref.Reason,
+		Evidence: ref.Evidence,
+	}
+	return writeRecord(r.Dir, *rec)
 }
 
 // Finish writes the run's terminal outcome: the state its exit code stands for,

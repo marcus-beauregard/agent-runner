@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -104,6 +105,7 @@ func RenderReport(runDir string) ([]byte, error) {
 	if torn != "" {
 		fmt.Fprintf(&b, "> Note: %s.\n\n", torn)
 	}
+	writeRefusal(&b, rec.Refusal)
 	for _, s := range stages {
 		writeStage(&b, s)
 	}
@@ -247,6 +249,32 @@ func writeHeader(b *strings.Builder, rec *record) {
 		fmt.Fprintf(b, "- Exit code: %d\n", *rec.ExitCode)
 	} else {
 		b.WriteString("- Exit code: none yet\n")
+	}
+	b.WriteString("\n")
+}
+
+// writeRefusal prints why the run stopped, before what it did: a reader who
+// knows the run refused reads every later section in that light. The evidence
+// is printed in key order so two renders of one record are the same bytes.
+func writeRefusal(b *strings.Builder, ref *refusalRecord) {
+	if ref == nil {
+		return
+	}
+	b.WriteString("## Refused\n\n")
+	if ref.Where != "" {
+		fmt.Fprintf(b, "- Stage: %s\n", ref.Where)
+	}
+	fmt.Fprintf(b, "- Code: %s\n- Reason: %s\n", ref.Code, ref.Reason)
+	if len(ref.Evidence) > 0 {
+		keys := make([]string, 0, len(ref.Evidence))
+		for k := range ref.Evidence {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b.WriteString("- Evidence:\n")
+		for _, k := range keys {
+			fmt.Fprintf(b, "  - %s: %s\n", k, cell(ref.Evidence[k]))
+		}
 	}
 	b.WriteString("\n")
 }

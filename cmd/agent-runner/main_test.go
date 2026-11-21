@@ -54,6 +54,12 @@ type record struct {
 	Subject  string `json:"subject"`
 	State    string `json:"state"`
 	ExitCode *int   `json:"exit_code"`
+	Refusal  *struct {
+		Code     string            `json:"code"`
+		Where    string            `json:"where"`
+		Reason   string            `json:"reason"`
+		Evidence map[string]string `json:"evidence"`
+	} `json:"refusal"`
 }
 
 // onlyRun digs the single run directory out of base and returns its record.
@@ -256,12 +262,13 @@ func TestReplayCommand(t *testing.T) {
 // package test is where that sentence is pinned.
 func TestWorkSandboxFlag(t *testing.T) {
 	tests := []struct {
-		name     string
-		mode     string
-		wantCode int
-		wantSt   string
+		name        string
+		mode        string
+		wantCode    int
+		wantSt      string
+		wantRefusal string // the refusal code, empty when the run did not refuse
 	}{
-		{name: "container refused without a namespace", mode: "container", wantCode: 3, wantSt: "refused"},
+		{name: "container refused without a namespace", mode: "container", wantCode: 3, wantSt: "refused", wantRefusal: "sandbox-unavailable"},
 		{name: "worktree accepted", mode: "worktree", wantCode: 0, wantSt: "done"},
 	}
 	for _, tc := range tests {
@@ -280,6 +287,56 @@ func TestWorkSandboxFlag(t *testing.T) {
 			if rec.ExitCode == nil || *rec.ExitCode != tc.wantCode {
 				t.Errorf("exit_code = %v, want %d", rec.ExitCode, tc.wantCode)
 			}
+			// The state says the run stopped; the refusal says why, and a run
+			// that did not stop must not carry one.
+			switch {
+			case tc.wantRefusal == "" && rec.Refusal != nil:
+				t.Errorf("refusal = %+v, want none", rec.Refusal)
+			case tc.wantRefusal != "" && rec.Refusal == nil:
+				t.Error("no refusal recorded, want one")
+			case tc.wantRefusal != "" && rec.Refusal.Code != tc.wantRefusal:
+				t.Errorf("refusal code = %q, want %q", rec.Refusal.Code, tc.wantRefusal)
+			}
 		})
+	}
+}
+
+// TestWorkRecordsWhyItRefused is the ticket's claim at the binary: a run that
+// refuses names its cause in run.json — code, stage, reason, evidence — and the
+// report repeats it, instead of the record saying only that it stopped.
+func TestWorkRecordsWhyItRefused(t *testing.T) {
+	closed := `{"number":27,"title":"Record","state":"CLOSED","assignees":[]}`
+	base := t.TempDir()
+	stubGH(t, closed, 0)
+	ref := "https://example.test/issues/27"
+	if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run"}); code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.Refusal == nil {
+		t.Fatal("no refusal recorded")
+	}
+	if rec.Refusal.Code != "issue-closed" {
+		t.Errorf("refusal code = %q, want issue-closed", rec.Refusal.Code)
+	}
+	if rec.Refusal.Where != "plan" {
+		t.Errorf("refusal stage = %q, want plan", rec.Refusal.Where)
+	}
+	if !strings.Contains(rec.Refusal.Reason, "closed") {
+		t.Errorf("refusal reason = %q, want it to say the issue is closed", rec.Refusal.Reason)
+	}
+	if got := rec.Refusal.Evidence["state"]; got != "CLOSED" {
+		t.Errorf("evidence state = %q, want CLOSED", got)
+	}
+	dir, err := runrec.Locate(base, rec.ID)
+	if err != nil {
+		t.Fatalf("locate run: %v", err)
+	}
+	out, err := runrec.RenderReport(dir)
+	if err != nil {
+		t.Fatalf("render report: %v", err)
+	}
+	if !strings.Contains(string(out), "- Code: issue-closed") {
+		t.Errorf("report does not name the refusal:\n%s", out)
 	}
 }

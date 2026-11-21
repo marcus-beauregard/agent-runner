@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	// Aliased for the same reason run.go aliases it: package run already has a
+	// helper named refuse, and an import cannot share that name at file scope.
+	refusal "github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
 // newTestRun creates one run under a fresh base, so a test can hand the same
@@ -411,5 +415,60 @@ func TestLocate(t *testing.T) {
 		if _, err := Locate(base, id); !errors.Is(err, ErrNoRecord) {
 			t.Errorf("Locate(%q) error = %v, want ErrNoRecord", id, err)
 		}
+	}
+}
+
+// TestRenderReportPrintsTheRefusal is the report half of the refusal: a record
+// that stopped says what it refused for, before the stages it interrupted, with
+// the evidence the reason can be checked against. The state and the code keep
+// saying the same thing.
+func TestRenderReportPrintsTheRefusal(t *testing.T) {
+	r, _ := newTestRun(t)
+	ref := refusal.New(refusal.OutsideWriteScope, "02-scope", "the patch writes outside the run directory")
+	ref.Evidence = map[string]string{"path": "/home/agent/.ssh/config", "mode": "0600"}
+	if err := r.Refuse(ref); err != nil {
+		t.Fatalf("Refuse: %v", err)
+	}
+	appendEvent(t, r, "stage", "03-build", stageData{Event: "start"})
+	if err := r.Finish(3); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		"## Refused",
+		"- Stage: 02-scope",
+		"- Code: outside-write-scope",
+		"- Reason: the patch writes outside the run directory",
+		"  - mode: 0600",
+		"  - path: /home/agent/.ssh/config",
+		"The record ended refused with exit code 3",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report does not contain %q\n---\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "## Refused") > strings.Index(got, "## 03-build") {
+		t.Errorf("the refusal prints after the stage it interrupted\n---\n%s", got)
+	}
+}
+
+// TestCleanRunHasNoRefusalSection: the section is evidence, so a record that did
+// not refuse must not carry an empty one.
+func TestCleanRunHasNoRefusalSection(t *testing.T) {
+	r, _ := newTestRun(t)
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	b, err := RenderReport(r.Dir)
+	if err != nil {
+		t.Fatalf("RenderReport: %v", err)
+	}
+	if strings.Contains(string(b), "## Refused") {
+		t.Errorf("a run that did not refuse printed a refusal section\n---\n%s", b)
 	}
 }
