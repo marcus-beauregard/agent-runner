@@ -76,6 +76,14 @@ func (l *Ledger) Append(kind, stage string, data any) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.appendLocked(kind, stage, raw)
+}
+
+// appendLocked writes one event line and returns once it is on disk. The caller
+// holds l.mu. Splitting it out lets a caller that has to read the stream before
+// extending it — a trigger spend — do both without another append landing in
+// between.
+func (l *Ledger) appendLocked(kind, stage string, raw json.RawMessage) error {
 	if l.w == nil {
 		return ErrLedgerClosed
 	}
