@@ -674,20 +674,34 @@ func TestReplayCommand(t *testing.T) {
 	}
 }
 
-// TestWorkSandboxFlag is the CLI half of the package's rules: an explicit
-// container on a host that cannot build one exits 3 and leaves a record saying
-// refused, while an explicit worktree runs and finishes done. The warning the
-// weaker mode prints goes to stderr, which this test does not capture — the
-// package test is where that sentence is pinned.
+// TestWorkSandboxFlag is the CLI half of the package's rules: both modes
+// complete a pipeline with the mode in run.json, an explicit container on a host
+// that cannot build one exits 3 and leaves a record saying refused, and an
+// explicit worktree runs and finishes done. bwrap is the host probe wearing a
+// disguise — a stub that fails stands for a host without a namespace, one that
+// succeeds for a host with it — so the table covers the mode a run got, not only
+// the mode it asked for. The warning the weaker mode prints goes to stderr,
+// which this test does not capture; the package test is where that sentence is
+// pinned.
 func TestWorkSandboxFlag(t *testing.T) {
+	// The two hosts in the table: one refuses the namespace, one builds it.
+	const (
+		bwrapUnavailable = "#!/bin/sh\nexit 1\n"
+		bwrapAvailable   = "#!/bin/sh\nexit 0\n"
+	)
 	tests := []struct {
 		name        string
 		mode        string
+		bwrap       string // the host probe this row runs against; empty means unavailable
 		wantCode    int
 		wantSt      string
 		wantSandbox string // the mode the record claims, empty when none was granted
 		wantRefusal string // the refusal code, empty when the run did not refuse
 	}{
+		// Both modes completing is #87's done-when: the field is only worth
+		// writing if a real pipeline puts it there.
+		{name: "container accepted", mode: "container", bwrap: bwrapAvailable, wantCode: 0, wantSt: "done", wantSandbox: "container"},
+		{name: "auto takes container when the host allows it", mode: "auto", bwrap: bwrapAvailable, wantCode: 0, wantSt: "done", wantSandbox: "container"},
 		{name: "container refused without a namespace", mode: "container", wantCode: 3, wantSt: "refused", wantRefusal: "sandbox-unavailable"},
 		{name: "worktree accepted", mode: "worktree", wantCode: 0, wantSt: "done", wantSandbox: "worktree"},
 		// Auto is the case the record exists for: it asked for the strong mode
@@ -698,7 +712,11 @@ func TestWorkSandboxFlag(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
-			stubPATH(t, map[string]string{"gh": ghStub, "bwrap": "#!/bin/sh\nexit 1\n"})
+			bwrap := tc.bwrap
+			if bwrap == "" {
+				bwrap = bwrapUnavailable
+			}
+			stubPATH(t, map[string]string{"gh": ghStub, "bwrap": bwrap})
 			ref := "https://example.test/issues/56"
 			args := []string{ref, "--run-dir", base, "--sandbox", tc.mode, "--dry-run"}
 			if code := work(context.Background(), args); code != tc.wantCode {
