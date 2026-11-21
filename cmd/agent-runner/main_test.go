@@ -27,6 +27,26 @@ func stubGH(t *testing.T, out string, code int) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// stubPATH puts exactly these scripts on PATH, alone: detection and the plan
+// must both answer from the host state the test built, not from whatever this
+// machine happens to have installed.
+func stubPATH(t *testing.T, scripts map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, script := range scripts {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatalf("write %s stub: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", dir)
+}
+
+// ghStub is a gh that prints one issue, so the plan path runs without a network.
+const ghStub = `#!/bin/sh
+printf '%s\n' '{"number":56,"title":"Sandbox","state":"OPEN","assignees":[]}'
+exit 0
+`
+
 // record is the part of run.json these tests read back.
 type record struct {
 	ID       string `json:"id"`
@@ -224,6 +244,41 @@ func TestReplayCommand(t *testing.T) {
 			}
 			if code := run([]string{"replay", r.Dir}); code != tc.wantCode {
 				t.Errorf("replay exit = %d, want %d", code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestWorkSandboxFlag is the CLI half of the package's rules: an explicit
+// container on a host that cannot build one exits 3 and leaves a record saying
+// refused, while an explicit worktree runs and finishes done. The warning the
+// weaker mode prints goes to stderr, which this test does not capture — the
+// package test is where that sentence is pinned.
+func TestWorkSandboxFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		wantCode int
+		wantSt   string
+	}{
+		{name: "container refused without a namespace", mode: "container", wantCode: 3, wantSt: "refused"},
+		{name: "worktree accepted", mode: "worktree", wantCode: 0, wantSt: "done"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			stubPATH(t, map[string]string{"gh": ghStub, "bwrap": "#!/bin/sh\nexit 1\n"})
+			ref := "https://example.test/issues/56"
+			args := []string{ref, "--run-dir", base, "--sandbox", tc.mode, "--dry-run"}
+			if code := work(context.Background(), args); code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			rec := onlyRun(t, base)
+			if rec.State != tc.wantSt {
+				t.Errorf("state = %q, want %q", rec.State, tc.wantSt)
+			}
+			if rec.ExitCode == nil || *rec.ExitCode != tc.wantCode {
+				t.Errorf("exit_code = %v, want %d", rec.ExitCode, tc.wantCode)
 			}
 		})
 	}
