@@ -853,11 +853,12 @@ func TestRunSandboxFlag(t *testing.T) {
 	}
 }
 
-// TestRunFlagsAfterTheTask is the usage line's own claim: the task comes first
-// and the flags follow it. Before splitFlags the flag package stopped at the
-// task, so "--sandbox container" was joined into the task text and the mode
-// stayed at auto — a silent fallback for a caller who asked for a namespace.
-func TestRunFlagsAfterTheTask(t *testing.T) {
+// TestRunTaskIsNotReinterpreted is the other half of the usage line's claim:
+// the flags come before the task, and the task is every word from the first
+// non-flag on, unchanged. A sentence that contains "--sandbox" stays a
+// sentence — lifting the word out would switch the mode and drop words from the
+// recorded subject, which is the silent misread this ticket exists to remove.
+func TestRunTaskIsNotReinterpreted(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	inDir(t, t.TempDir())
@@ -867,18 +868,44 @@ func TestRunFlagsAfterTheTask(t *testing.T) {
 		"ls":    "#!/bin/sh\necho inside\n",
 	})
 	base := t.TempDir()
-	// worktree, not container: auto would answer container on a host whose
-	// bwrap probe succeeds, so a container assertion could pass on the very bug
-	// this test is for.
-	if code := run([]string{"run", "list the files", "--sandbox", "worktree", "--run-dir", base}); code != 0 {
+	// worktree is the word in the sentence and auto answers container on this
+	// stub host, so the mode in the record shows whether the word was taken.
+	const task = "explain why --sandbox worktree is not a mode"
+	if code := run([]string{"run", "--run-dir", base, "explain", "why", "--sandbox", "worktree", "is", "not", "a", "mode"}); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	rec := onlyRun(t, base)
-	if rec.Sandbox != "worktree" {
-		t.Errorf("sandbox = %q, want worktree", rec.Sandbox)
+	if rec.Subject != task {
+		t.Errorf("subject = %q, want %q", rec.Subject, task)
 	}
-	if rec.Subject != "list the files" {
-		t.Errorf("subject = %q, want the task alone", rec.Subject)
+	if rec.Sandbox != "container" {
+		t.Errorf("sandbox = %q, want container from auto: the task word must not switch the mode", rec.Sandbox)
+	}
+}
+
+// TestRunDoubleDashKeepsADashTask pins the escape the usage line advertises:
+// "--" ends the flags, so a task that begins with a dash word is text and not a
+// mode switch.
+func TestRunDoubleDashKeepsADashTask(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inDir(t, t.TempDir())
+	stubPATH(t, map[string]string{
+		"git":   gitAbsent,
+		"bwrap": "#!/bin/sh\nexit 0\n",
+		"ls":    "#!/bin/sh\necho inside\n",
+	})
+	base := t.TempDir()
+	const task = "--sandbox is a word here"
+	if code := run([]string{"run", "--run-dir", base, "--", "--sandbox", "is", "a", "word", "here"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.Subject != task {
+		t.Errorf("subject = %q, want %q", rec.Subject, task)
+	}
+	if rec.Sandbox != "container" {
+		t.Errorf("sandbox = %q, want container from auto: the word after -- is text", rec.Sandbox)
 	}
 }
 
@@ -896,7 +923,7 @@ func TestRunRecordsARefusedNamespace(t *testing.T) {
 		"ls":    "#!/bin/sh\necho inside\n",
 	})
 	base := t.TempDir()
-	if code := run([]string{"run", "list the files", "--sandbox", "container", "--run-dir", base}); code != 3 {
+	if code := run([]string{"run", "--sandbox", "container", "--run-dir", base, "list the files"}); code != 3 {
 		t.Fatalf("exit code = %d, want 3", code)
 	}
 	rec := onlyRun(t, base)

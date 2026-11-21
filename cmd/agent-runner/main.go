@@ -77,13 +77,12 @@ func runAgent(ctx context.Context, args []string) int {
 	fs.SetOutput(io.Discard)
 	sandboxMode := fs.String("sandbox", sandbox.Auto, "isolation mode: auto, container or worktree")
 	runDir := fs.String("run-dir", "", "base directory for the run record; no record is written unless it is set")
-	// The usage line puts the task first, so the flags have to be lifted out of
-	// the argument list before parsing: the flag package stops at the first
-	// non-flag, and a trailing "--sandbox container" would be folded into the
-	// task text while the mode stayed at auto. A run that asked for container
-	// and got worktree is the silent fallback this ticket exists to forbid.
-	flags, positional := splitFlags(args)
-	if err := fs.Parse(flags); err != nil {
+	// Flags come before the task, as the usage line says. The flag package stops
+	// at the first non-flag, so everything from there is task text, kept word for
+	// word: a sentence that happens to contain "--sandbox" cannot switch the mode
+	// and cannot lose a word out of the middle of itself. A task that starts with
+	// a dash word is written behind "--", the only terminator this command honours.
+	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usage(os.Stdout)
 			return 0
@@ -91,7 +90,7 @@ func runAgent(ctx context.Context, args []string) int {
 		fmt.Fprintf(os.Stderr, "agent-runner: run: %v\n", err)
 		return 1
 	}
-	task := strings.Join(positional, " ")
+	task := strings.Join(fs.Args(), " ")
 	if task == "" {
 		task = "List the files in this project"
 	}
@@ -446,29 +445,6 @@ func refuseDrift(drift []audit.Drift, cause error) *refuse.Refusal {
 	return r
 }
 
-// splitFlags separates a command's flags from its positionals, so a flag may
-// follow the task the way the usage line advertises. Every flag `run` defines
-// takes a value, so a lone flag token owns the argument after it; "--" ends the
-// flags and leaves whatever follows to the caller as an argument.
-func splitFlags(args []string) (flags, positional []string) {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--":
-			return flags, append(positional, args[i+1:]...)
-		case strings.HasPrefix(arg, "-") && arg != "-":
-			flags = append(flags, arg)
-			if !strings.Contains(arg, "=") && i+1 < len(args) {
-				i++
-				flags = append(flags, args[i])
-			}
-		default:
-			positional = append(positional, arg)
-		}
-	}
-	return flags, positional
-}
-
 // work runs the M0 dry-run: it plans the change and prints the gate it would
 // run, writing nothing except the run record when --run-dir asks for one. The
 // issue URL is the leading positional argument, so it is consumed before the
@@ -689,8 +665,9 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `agent-runner — a step-capped autonomous agent runtime and the worker built on it.
 
 Usage:
-  agent-runner run <task> [--sandbox auto|container|worktree] [--run-dir <dir>]
+  agent-runner run [--sandbox auto|container|worktree] [--run-dir <dir>] [--] <task>
                                                                  run the offline mock agent
+                                                                 (flags come before the task; "--" lets a task start with a dash)
   agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>]
                    [--sandbox auto|container|worktree] --dry-run
                                                                  plan the work, writing nothing but the run record
