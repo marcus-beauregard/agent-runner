@@ -72,7 +72,12 @@ type record struct {
 	Repo      string `json:"repo"`
 	Branch    string `json:"branch"`
 	BaseSHA   string `json:"base_sha"`
-	Budget    string `json:"budget"`
+	// Worktree is the checkout this run was given, omitted when it never had
+	// one. The record carries it because the record is written before the
+	// stream: a run killed between the two still names its tree here, so
+	// cleanup finds an orphan the event alone would have hidden.
+	Worktree string `json:"worktree,omitempty"`
+	Budget   string `json:"budget"`
 	// Account is omitted when empty, which is what a run recorded before this
 	// field existed looks like. Replay refuses that rather than guessing it.
 	Account  string `json:"account,omitempty"`

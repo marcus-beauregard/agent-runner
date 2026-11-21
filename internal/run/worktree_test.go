@@ -526,3 +526,132 @@ func readEvents(t *testing.T, runDir string) []Event {
 	}
 	return events
 }
+
+// TestFinishCleansAWorktreeTheStreamNeverRecorded is the window between the
+// record write and the event append: Worktree names the tree in run.json and
+// the process dies before worktree:add lands. The record is what cleanup reads,
+// so the orphan this ticket exists to close is still found and still recorded.
+func TestFinishCleansAWorktreeTheStreamNeverRecorded(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	branch, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID))
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	// The kill happens here: the tree and the record exist, the stream does not.
+	if err := os.Truncate(filepath.Join(r.Dir, "run.ndjson"), 0); err != nil {
+		t.Fatalf("truncate ledger: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	if err := r.Finish(0); err != nil {
+		t.Fatalf("Finish(0): %v", err)
+	}
+	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("worktree still on disk after Finish: %v", err)
+	}
+	if list := mustGit(t, parent, "worktree", "list", "--porcelain"); strings.Contains(list, wt) {
+		t.Errorf("parent still registers %s:\\n%s", wt, list)
+	}
+	if _, err := mustGitErr(parent, "rev-parse", "--verify", "refs/heads/"+branch); err != nil {
+		t.Errorf("cleanup deleted the branch: %v", err)
+	}
+	removed := false
+	for _, e := range readEvents(t, r.Dir) {
+		if e.Kind == kindWorktreeRemove {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Errorf("stream has no %s: the removal happened without being recorded", kindWorktreeRemove)
+	}
+}
+
+// TestWorktreeListedFindsATreeThatIsGoneBehindASymlink is the case the list
+// proof exists for: the tree is deleted out of band and its locked registration
+// survives prune, under a run directory reached through a symlink. git prints
+// the resolved path while the caller holds the link's spelling, and the leaf no
+// longer exists on either side, so the comparison has to resolve the parent.
+func TestWorktreeListedFindsATreeThatIsGoneBehindASymlink(t *testing.T) {
+	parent := worktreeParent(t)
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(link, Meta{Kind: "build", Subject: cageSubject, Repo: parent})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	mustGit(t, parent, "worktree", "lock", wt)
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, parent, "worktree", "prune")
+	listed, err := worktreeListed(parent, wt)
+	if err != nil {
+		t.Fatalf("worktreeListed: %v", err)
+	}
+	if !listed {
+		t.Errorf("worktreeListed = false, want true: %s is still registered under its resolved path", wt)
+	}
+}
+
+// TestFinishMarksTheRunFailedWhenCleanupFails pins the transition the cost of
+// the cleanup step depends on: a removal that cannot be proven turns the record
+// into failed with exit 1 and leaves the reason in the stream, instead of
+// reporting a done run over a parent that still names a tree.
+func TestFinishMarksTheRunFailedWhenCleanupFails(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	// A parent that cannot be read makes every git call in RemoveWorktree fail,
+	// which is the cheapest honest cleanup failure to build.
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	rec.Repo = filepath.Join(t.TempDir(), "missing")
+	if err := writeRecord(r.Dir, *rec); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+	if err := r.Finish(0); err == nil {
+		t.Fatal("Finish(0) = nil, want the cleanup failure")
+	}
+	got, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	if got.State != stateFailed || got.ExitCode == nil || *got.ExitCode != 1 {
+		t.Errorf("record state/exit = %q/%v, want %q/1", got.State, got.ExitCode, stateFailed)
+	}
+	var payload worktreeRemove
+	removed := false
+	for _, e := range readEvents(t, r.Dir) {
+		if e.Kind != kindWorktreeRemove {
+			continue
+		}
+		removed = true
+		if err := json.Unmarshal(e.Data, &payload); err != nil {
+			t.Fatalf("decode %s: %v", kindWorktreeRemove, err)
+		}
+	}
+	if !removed {
+		t.Fatalf("stream has no %s", kindWorktreeRemove)
+	}
+	if payload.Error == "" {
+		t.Errorf("%s records no error: a parent that still names the tree reads as clean", kindWorktreeRemove)
+	}
+	if payload.ExitCode != 0 {
+		t.Errorf("payload exit code = %d, want the code the run reached (0)", payload.ExitCode)
+	}
+}

@@ -165,9 +165,9 @@ func Worktree(runDir, repo, slug string) (branch, baseSHA string, err error) {
 	if _, err := gitRun(repo, "worktree", "add", "--no-track", wt, "-b", branch, base); err != nil {
 		return "", "", fmt.Errorf("add worktree: %w", err)
 	}
-	oldBranch, oldBase := rec.Branch, rec.BaseSHA
+	oldBranch, oldBase, oldWT := rec.Branch, rec.BaseSHA, rec.Worktree
 	ref := WorktreeRef{Path: wt, Branch: branch, BaseSHA: base}
-	rec.Branch, rec.BaseSHA = branch, base
+	rec.Branch, rec.BaseSHA, rec.Worktree = branch, base, wt
 	if err := writeRecord(runDir, *rec); err != nil {
 		rollbackWorktree(repo, wt, branch)
 		return "", "", fmt.Errorf("record worktree: %w", err)
@@ -177,7 +177,7 @@ func Worktree(runDir, repo, slug string) (branch, baseSHA string, err error) {
 	// that cannot: the tree comes out and the record goes back to naming none.
 	if err := appendWorktreeEvent(runDir, kindWorktreeAdd, ref); err != nil {
 		rollbackWorktree(repo, wt, branch)
-		rec.Branch, rec.BaseSHA = oldBranch, oldBase
+		rec.Branch, rec.BaseSHA, rec.Worktree = oldBranch, oldBase, oldWT
 		if werr := writeRecord(runDir, *rec); werr != nil {
 			return "", "", fmt.Errorf("record worktree: %w (restoring the record also failed: %v)", err, werr)
 		}
@@ -218,7 +218,12 @@ func RemoveWorktree(runDir string) error {
 	if rec.Repo == "" {
 		return fmt.Errorf("remove worktree: run record names no repo")
 	}
-	wt := filepath.Join(runDir, "worktree")
+	// The record names the tree. A record written before the field existed
+	// falls back to the fixed location, which is where Worktree puts it.
+	wt := rec.Worktree
+	if wt == "" {
+		wt = filepath.Join(runDir, "worktree")
+	}
 	_, removeErr := gitRun(rec.Repo, "worktree", "remove", "--force", "--force", wt)
 	_, pruneErr := gitRun(rec.Repo, "worktree", "prune")
 	listed, listErr := worktreeListed(rec.Repo, wt)
@@ -251,6 +256,15 @@ func RemoveWorktree(runDir string) error {
 func resolvePath(path string) string {
 	if real, err := filepath.EvalSymlinks(path); err == nil {
 		return real
+	}
+	// A tree that is gone cannot be resolved itself, but the symlink that made
+	// its spelling differ from git's lives in a directory that still exists.
+	// The leaf name is the same either way, so resolving the parent is enough.
+	// Falling back to the caller's spelling would miss a registration that
+	// outlived its tree, which is the case the list proof exists for.
+	dir, leaf := filepath.Split(filepath.Clean(path))
+	if realDir, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
+		return filepath.Join(realDir, leaf)
 	}
 	return filepath.Clean(path)
 }
@@ -299,18 +313,22 @@ func worktreeListed(repo, path string) (bool, error) {
 // person keep theirs for the same reason, and a run with no terminal state is
 // resumable. gc collects all of those by age (PRD §6.3).
 //
-// It is a no-op for a run that never got a worktree. The ledger decides that,
+// It is a no-op for a run whose record names no tree. The record decides that,
 // not the filesystem: a tree already removed by hand still needs its
 // registration pruned and its removal recorded.
 func CleanupWorktree(runDir string, code int) error {
-	added, err := worktreeRecorded(runDir)
+	rec, err := loadRecord(runDir)
 	if err != nil {
 		return err
 	}
-	if !added {
+	// The record decides, not the stream: Worktree writes run.json before it
+	// appends worktree:add, so a run killed between the two still names its
+	// tree here. Reading the event alone would call that run treeless and
+	// leave the checkout and its registration invisible forever.
+	if rec.Worktree == "" {
 		return nil
 	}
-	wt := filepath.Join(runDir, "worktree")
+	wt := rec.Worktree
 	data := worktreeRemove{Path: wt, ExitCode: code}
 	if err := RemoveWorktree(runDir); err != nil {
 		data.Error = err.Error()
@@ -323,22 +341,6 @@ func CleanupWorktree(runDir string, code int) error {
 		return fmt.Errorf("record worktree removal: %w", err)
 	}
 	return nil
-}
-
-// worktreeRecorded reports whether the run's stream holds a worktree:add. A
-// missing stream is a run that recorded nothing, which is the same answer as a
-// run that never had a tree.
-func worktreeRecorded(runDir string) (bool, error) {
-	events, _, err := readLedger(filepath.Join(runDir, "run.ndjson"))
-	if err != nil {
-		return false, err
-	}
-	for _, e := range events {
-		if e.Kind == kindWorktreeAdd {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // appendWorktreeEvent adds one worktree event to the run's stream. It opens the
