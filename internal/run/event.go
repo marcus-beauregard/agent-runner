@@ -9,6 +9,10 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	// Alias, because worktree.go has a helper named refuse: this file needs the
+	// vocabulary, not another way to spell an error.
+	refusal "github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
 // ErrLedgerClosed reports an append after Close. The stream is finished at that
@@ -21,7 +25,7 @@ var ErrLedgerClosed = errors.New("ledger closed")
 type Event struct {
 	Seq   int64           `json:"seq"`             // increases across a run, including after a resume
 	TS    time.Time       `json:"ts"`              // UTC
-	Kind  string          `json:"kind"`            // "stage", "tool", "cmd:exit", "decision", "gate", "trigger", "state"
+	Kind  string          `json:"kind"`            // "stage", "tool", "cmd:exit", "decision", "gate", "trigger", "state", "refusal"
 	Stage string          `json:"stage,omitempty"` // the stage an event belongs to, if any
 	Data  json.RawMessage `json:"data"`            // the payload
 }
@@ -77,6 +81,37 @@ func (l *Ledger) Append(kind, stage string, data any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.appendLocked(kind, stage, raw)
+}
+
+// kindRefusal is the event a run leaves when it stops on purpose. It is the
+// only kind that says nothing about an attempt — everything before it may have
+// run perfectly — so a reader looking for where the run ended looks for this.
+const kindRefusal = "refusal"
+
+// refusalData is the payload of a refusal event. It repeats run.json's refusal
+// section rather than pointing at it: the stream is the part of a run a person
+// follows in order, and a stop that has to be looked up in another file is a
+// stop the stream does not explain.
+type refusalData struct {
+	Code     string            `json:"code"`
+	Reason   string            `json:"reason"`
+	Evidence map[string]string `json:"evidence,omitempty"`
+}
+
+// Refusal appends the one event that records ref, at the stage that refused.
+// The refusal is the same value run.json holds — a stream naming a different
+// code from the record would be two accounts of one stop — and a nil refusal is
+// an error rather than a silent empty event, because an event that refuses
+// nothing is a line nobody can act on.
+func (l *Ledger) Refusal(ref *refusal.Refusal) error {
+	if ref == nil {
+		return errors.New("refusal event: nil refusal")
+	}
+	return l.Append(kindRefusal, ref.Where, refusalData{
+		Code:     string(ref.Code),
+		Reason:   ref.Reason,
+		Evidence: ref.Evidence,
+	})
 }
 
 // appendLocked writes one event line and returns once it is on disk. The caller

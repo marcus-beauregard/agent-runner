@@ -69,6 +69,10 @@ type Meta struct {
 type Run struct {
 	ID  string
 	Dir string
+	// stream is the run's event stream when a caller attached one. Refuse
+	// appends to it, so a refusal sits in the same file as the events that led
+	// to it rather than in run.json alone.
+	stream *Ledger
 }
 
 // record is run.json. The field order is the file's field order, fixed so that
@@ -172,11 +176,23 @@ func New(base string, meta Meta) (*Run, error) {
 	return &Run{ID: id, Dir: dir}, nil
 }
 
+// ErrEventLost reports a refusal the record holds whose event could not be
+// appended. The run is refused all the same: only the line a reader following
+// the stream sees is missing, and a caller that stopped here would leave the
+// record saying running for a process that has already exited — the state
+// Finish exists to prevent.
+var ErrEventLost = errors.New("refusal recorded, event lost")
+
 // Refuse records why the run stopped, before Finish writes its outcome. The
 // code is checked against the vocabulary: a record is the evidence a person or
 // a later run reads, and an unknown code in it would be a reason nobody can
 // name. Calling it after Finish is a mistake — Finish rewrites the whole record
 // and a refusal written after it would be a record of a run that already ended.
+//
+// The record is written before the event, so a failure after that point still
+// leaves a refusal someone can read. Such a failure is reported as ErrEventLost
+// rather than as a plain error: the refusal is recorded, and the caller's next
+// step is still Finish.
 func (r *Run) Refuse(ref *refusal.Refusal) error {
 	if ref == nil {
 		return errors.New("refuse: nil refusal")
@@ -194,8 +210,25 @@ func (r *Run) Refuse(ref *refusal.Refusal) error {
 		Reason:   ref.Reason,
 		Evidence: ref.Evidence,
 	}
-	return writeRecord(r.Dir, *rec)
+	if err := writeRecord(r.Dir, *rec); err != nil {
+		return err
+	}
+	// The stream carries the same refusal, so a reader following the run's
+	// events sees where it stopped without opening run.json. It is appended
+	// after the record: an event about a refusal the record does not hold would
+	// be the only account of it, and the record is the one that counts.
+	if r.stream != nil {
+		if err := r.stream.Refusal(ref); err != nil {
+			return fmt.Errorf("%w: %v", ErrEventLost, err)
+		}
+	}
+	return nil
 }
+
+// SetLedger attaches the run's event stream, which Refuse appends its event to.
+// A run with no stream records a refusal in run.json alone, which is all a
+// caller that never opened one can offer.
+func (r *Run) SetLedger(l *Ledger) { r.stream = l }
 
 // Finish writes the run's terminal outcome: the state its exit code stands for,
 // and the code itself. It runs once the result is known and before the process

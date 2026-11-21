@@ -117,21 +117,36 @@ func runAgent(ctx context.Context, args []string) int {
 	}
 
 	var rec *runrec.Run
+	var led *runrec.Ledger
 	if *runDir != "" {
 		rec, err = runrec.New(*runDir, runrec.Meta{Kind: "run", Subject: task, Repo: wd, Sandbox: string(mode)})
 		if err != nil {
 			return fail(err)
 		}
 		fmt.Printf("Run: %s\nDir: %s\n\n", rec.ID, rec.Dir)
+		// The stream is opened with the record rather than with the first
+		// command, because a refusal is an event too: a run that refuses before
+		// it ever ran a command still has to say so in the file a reader follows.
+		// It is closed after the last command, so a run killed mid-command still
+		// leaves the events of the commands before it.
+		led, err = runrec.OpenLedger(filepath.Join(rec.Dir, "run.ndjson"))
+		if err != nil {
+			// The run is over before it began, and its record must say so: a
+			// run.json left at running for a process that exited is the state
+			// Finish exists to prevent.
+			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
+				return code
+			}
+			return fail(fmt.Errorf("open record: %w", err))
+		}
+		defer closeRecord(led)
+		rec.SetLedger(led)
 	}
 	// A refusal is a finished run, so it gets a record with its own state rather
 	// than a directory that says running for a process that already exited.
 	if modeErr != nil {
-		if rec != nil {
-			if rerr := rec.Refuse(refusalForMode(modeErr)); rerr != nil {
-				fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
-				return 1
-			}
+		if !refusalRecorded(rec, refusalForMode(modeErr)) {
+			return 1
 		}
 		if code := finishRun(rec, report.ExitCode(modeErr)); code != 0 {
 			return code
@@ -164,11 +179,8 @@ func runAgent(ctx context.Context, args []string) int {
 			}
 		}
 		if err := registry.SetIsolation(tools.Isolation{Mode: mode, RunDir: layout}); err != nil {
-			if rec != nil {
-				if rerr := recordRefusal(rec, err); rerr != nil {
-					fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
-					return 1
-				}
+			if !refusalRecorded(rec, refusalOf(err)) {
+				return 1
 			}
 			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
 				return code
@@ -177,31 +189,15 @@ func runAgent(ctx context.Context, args []string) int {
 		}
 	}
 	// A command is the run's most consequential act, so its record belongs to
-	// the run rather than to the process that happened to run it. The stream is
-	// opened before the first command and closed after the last, so a run that
-	// is killed mid-command still leaves the events of the commands before it.
-	// An unrecorded run has nowhere to put them and, as before, keeps nothing.
-	if rec != nil {
-		led, err := runrec.OpenLedger(filepath.Join(rec.Dir, "run.ndjson"))
-		if err != nil {
-			// The run is over before it began, and its record must say so: a
-			// run.json left at running for a process that exited is the state
-			// Finish exists to prevent.
-			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
-				return code
-			}
-			return fail(fmt.Errorf("open record: %w", err))
-		}
-		defer closeRecord(led)
+	// the run rather than to the process that happened to run it. An unrecorded
+	// run has nowhere to put its events and, as before, keeps nothing.
+	if led != nil {
 		registry.SetLedger(led)
 	}
 	result, err := runAudited(ctx, wd, task, model, registry)
 	if err != nil {
-		if rec != nil {
-			if rerr := recordRefusal(rec, err); rerr != nil {
-				fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", rerr)
-				return 1
-			}
+		if !refusalRecorded(rec, refusalOf(err)) {
+			return 1
 		}
 		if code := finishRun(rec, report.ExitCode(err)); code != 0 {
 			return code
@@ -547,11 +543,24 @@ func work(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	fmt.Printf("Run: %s\nDir: %s\n\n", r.ID, r.Dir)
+	// Every recorded run has one stream, opened with the record. This command
+	// writes no command events yet, so what the stream holds today is the
+	// refusal — and a refusal that only existed in run.json would leave the
+	// events file a reader follows with no account of why the run stopped.
+	led, err := runrec.OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+	if err != nil {
+		if err := r.Finish(report.ExitCode(err)); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-runner: record run outcome: %v\n", err)
+			return 1
+		}
+		return fail(fmt.Errorf("open record: %w", err))
+	}
+	defer closeRecord(led)
+	r.SetLedger(led)
 	// A refusal is a finished run, so it gets a record with its own state rather
 	// than a directory that says running for a process that already exited.
 	if modeErr != nil {
-		if err := r.Refuse(refusalForMode(modeErr)); err != nil {
-			fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+		if !refusalRecorded(r, refusalForMode(modeErr)) {
 			return 1
 		}
 		if err := r.Finish(report.ExitCode(modeErr)); err != nil {
@@ -561,8 +570,7 @@ func work(ctx context.Context, args []string) int {
 		return fail(modeErr)
 	}
 	code, planErr := planAndPrint(ctx, ref, *repo, *gate)
-	if err := recordRefusal(r, planErr); err != nil {
-		fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+	if !refusalRecorded(r, refusalOf(planErr)) {
 		return 1
 	}
 	if planErr != nil {
@@ -590,15 +598,34 @@ func planAndPrint(ctx context.Context, ref, repo, gate string) (int, error) {
 	return 0, nil
 }
 
-// recordRefusal writes the typed refusal behind err into the run record. Only a
-// *refuse.Refusal is recorded: an arbitrary error is not a refusal, and writing
-// one as if it were would put a code on something no vocabulary covers.
-func recordRefusal(r *runrec.Run, err error) error {
+// refusalOf returns the refusal carried by err, or nil when err is not one: a
+// stage that failed for its own reasons has nothing to record here. Only a
+// *refuse.Refusal is recorded — writing an arbitrary error as if it were a
+// refusal would put a code on something no vocabulary covers.
+func refusalOf(err error) *refuse.Refusal {
 	var ref *refuse.Refusal
-	if !errors.As(err, &ref) {
-		return nil
+	if errors.As(err, &ref) {
+		return ref
 	}
-	return r.Refuse(ref)
+	return nil
+}
+
+// refusalRecorded records the refusal and reports whether the run may go on to
+// Finish. A refusal the record holds is enough: a lost event is said out loud
+// and the run is still refused, because a record left at running for a process
+// that has already exited is the state Finish exists to prevent. An error that
+// means the record does not hold the refusal leaves nothing for Finish to
+// carry, so the caller stops instead of writing an outcome with no reason.
+func refusalRecorded(r *runrec.Run, ref *refuse.Refusal) bool {
+	if r == nil || ref == nil {
+		return true
+	}
+	err := r.Refuse(ref)
+	if err == nil {
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "agent-runner: record refusal: %v\n", err)
+	return errors.Is(err, runrec.ErrEventLost)
 }
 
 // refusalForMode types the sandbox refusal, which is decided before any stage

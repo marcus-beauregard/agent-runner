@@ -9,6 +9,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	// Alias, for the same reason run.go uses one: worktree.go has a helper
+	// named refuse.
+	refusal "github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
 // TestNewRefusesReusedID proves the collision rule: an id that already has a
@@ -299,6 +303,162 @@ func TestFinishRefusesUnusableRecord(t *testing.T) {
 	r := &Run{ID: "x", Dir: t.TempDir()}
 	if err := r.Finish(0); !errors.Is(err, ErrNoRecord) {
 		t.Fatalf("err = %v, want ErrNoRecord", err)
+	}
+}
+
+// TestRefuseReportsALostEvent is the other half of the same claim: the record
+// is written before the event, so a stream that cannot take the line still
+// leaves a refusal a person can read, and Finish — the caller's next step —
+// still gives the run a terminal state instead of leaving it saying running for
+// a process that has exited.
+func TestRefuseReportsALostEvent(t *testing.T) {
+	r, err := New(t.TempDir(), Meta{Kind: "build", Subject: "https://example.test/issues/59"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	led, err := OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	// A closed stream stands in for a write that fails: the append has nowhere
+	// to land, and the record has already been written by then.
+	if err := led.Close(); err != nil {
+		t.Fatalf("close ledger: %v", err)
+	}
+	r.SetLedger(led)
+
+	ref := refusal.New(refusal.SandboxUnavailable, "sandbox", "no namespace on this host")
+	err = r.Refuse(ref)
+	if !errors.Is(err, ErrEventLost) {
+		t.Fatalf("Refuse = %v, want an error wrapping ErrEventLost", err)
+	}
+	rec, err := loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("loadRecord: %v", err)
+	}
+	if rec.Refusal == nil || rec.Refusal.Code != string(refusal.SandboxUnavailable) {
+		t.Fatalf("record refusal = %+v, want %q recorded despite the lost event", rec.Refusal, refusal.SandboxUnavailable)
+	}
+
+	if err := r.Finish(3); err != nil {
+		t.Fatalf("Finish after a lost event: %v", err)
+	}
+	rec, err = loadRecord(r.Dir)
+	if err != nil {
+		t.Fatalf("loadRecord after Finish: %v", err)
+	}
+	if rec.State != stateRefused {
+		t.Errorf("state = %q, want %q", rec.State, stateRefused)
+	}
+	if rec.ExitCode == nil || *rec.ExitCode != 3 {
+		t.Errorf("exit code = %v, want 3", rec.ExitCode)
+	}
+}
+
+// TestRefuseAppendsOneRefusalEvent is #59's claim at the record: a refusal is
+// one event in the run's stream, at the stage that refused, carrying the same
+// code, reason and evidence run.json holds. A run with no stream still records
+// the refusal in run.json — that is what a caller that never opened one can
+// offer — and writes no event, because there is no file to write it to.
+func TestRefuseAppendsOneRefusalEvent(t *testing.T) {
+	tests := []struct {
+		name   string
+		attach bool
+	}{
+		{name: "stream attached", attach: true},
+		{name: "no stream attached", attach: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := New(t.TempDir(), Meta{Kind: "build", Subject: "https://example.test/issues/59"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			var led *Ledger
+			if tt.attach {
+				led, err = OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+				if err != nil {
+					t.Fatalf("OpenLedger: %v", err)
+				}
+				r.SetLedger(led)
+			}
+			ref := refusal.New(refusal.SandboxUnavailable, "sandbox", "no namespace on this host")
+			ref.Evidence = map[string]string{"bwrap": "exit 1"}
+			if err := r.Refuse(ref); err != nil {
+				t.Fatalf("Refuse: %v", err)
+			}
+			// The record holds the refusal either way; the event is what the
+			// stream adds.
+			raw, err := os.ReadFile(filepath.Join(r.Dir, "run.json"))
+			if err != nil {
+				t.Fatalf("read run.json: %v", err)
+			}
+			var stored struct {
+				Refusal *struct {
+					Code string `json:"code"`
+				} `json:"refusal"`
+			}
+			if err := json.Unmarshal(raw, &stored); err != nil {
+				t.Fatalf("parse run.json: %v", err)
+			}
+			if stored.Refusal == nil || stored.Refusal.Code != string(refusal.SandboxUnavailable) {
+				t.Fatalf("run.json refusal = %+v, want code %q", stored.Refusal, refusal.SandboxUnavailable)
+			}
+			if led != nil {
+				if err := led.Close(); err != nil {
+					t.Fatalf("close ledger: %v", err)
+				}
+			}
+			events, torn, err := readLedger(filepath.Join(r.Dir, "run.ndjson"))
+			if err != nil {
+				t.Fatalf("read ledger: %v", err)
+			}
+			if torn != "" {
+				t.Errorf("ledger torn: %s", torn)
+			}
+			if !tt.attach {
+				if len(events) != 0 {
+					t.Fatalf("events = %d, want none without a stream", len(events))
+				}
+				return
+			}
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want exactly one: %+v", len(events), events)
+			}
+			e := events[0]
+			if e.Kind != kindRefusal {
+				t.Errorf("event kind = %q, want %q", e.Kind, kindRefusal)
+			}
+			if e.Stage != "sandbox" {
+				t.Errorf("event stage = %q, want sandbox", e.Stage)
+			}
+			var got refusalData
+			if err := json.Unmarshal(e.Data, &got); err != nil {
+				t.Fatalf("parse event data: %v", err)
+			}
+			if got.Code != string(refusal.SandboxUnavailable) {
+				t.Errorf("event code = %q, want %q", got.Code, refusal.SandboxUnavailable)
+			}
+			if got.Reason != ref.Reason {
+				t.Errorf("event reason = %q, want %q", got.Reason, ref.Reason)
+			}
+			if got.Evidence["bwrap"] != "exit 1" {
+				t.Errorf("event evidence = %v, want bwrap: exit 1", got.Evidence)
+			}
+		})
+	}
+}
+
+// TestRefusalEventRefusesNil pins that a nil refusal is an error rather than an
+// empty event: a line that refuses nothing is a line no reader can act on.
+func TestRefusalEventRefusesNil(t *testing.T) {
+	led, err := OpenLedger(filepath.Join(t.TempDir(), "run.ndjson"))
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	defer led.Close()
+	if err := led.Refusal(nil); err == nil {
+		t.Fatal("Refusal(nil) = nil error, want one")
 	}
 }
 

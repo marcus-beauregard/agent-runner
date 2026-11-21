@@ -70,6 +70,42 @@ type record struct {
 	} `json:"refusal"`
 }
 
+// refusalEvent is the part of one refusal event these tests read back.
+type refusalEvent struct {
+	Kind  string `json:"kind"`
+	Stage string `json:"stage"`
+	Data  struct {
+		Code     string            `json:"code"`
+		Reason   string            `json:"reason"`
+		Evidence map[string]string `json:"evidence"`
+	} `json:"data"`
+}
+
+// refusalEvents reads the run's stream and returns every refusal event in it.
+// The stream is the file a reader follows in order, so a test that only reads
+// run.json cannot tell whether the run said anything as it stopped.
+func refusalEvents(t *testing.T, dir string) []refusalEvent {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "run.ndjson"))
+	if err != nil {
+		t.Fatalf("read run.ndjson: %v", err)
+	}
+	var out []refusalEvent
+	for i, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var e refusalEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("parse run.ndjson line %d: %v", i+1, err)
+		}
+		if e.Kind == "refusal" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // onlyRunDir digs the single run directory out of base.
 func onlyRunDir(t *testing.T, base string) string {
 	t.Helper()
@@ -748,6 +784,17 @@ func TestWorkSandboxFlag(t *testing.T) {
 			case tc.wantRefusal != "" && rec.Refusal.Code != tc.wantRefusal:
 				t.Errorf("refusal code = %q, want %q", rec.Refusal.Code, tc.wantRefusal)
 			}
+			// The stream says the same thing, and says nothing when the run did
+			// not refuse: an event on a completed run would read as a stop.
+			events := refusalEvents(t, onlyRunDir(t, base))
+			switch {
+			case tc.wantRefusal == "" && len(events) != 0:
+				t.Errorf("refusal events = %d, want none", len(events))
+			case tc.wantRefusal != "" && len(events) != 1:
+				t.Errorf("refusal events = %d, want exactly one", len(events))
+			case tc.wantRefusal != "" && events[0].Data.Code != tc.wantRefusal:
+				t.Errorf("refusal event code = %q, want %q", events[0].Data.Code, tc.wantRefusal)
+			}
 		})
 	}
 }
@@ -789,6 +836,24 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "- Code: issue-closed") {
 		t.Errorf("report does not name the refusal:\n%s", out)
+	}
+	// The stream carries the same refusal, at the same stage, in the same
+	// words: following the events alone has to say why the run stopped.
+	events := refusalEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("refusal events = %d, want exactly one", len(events))
+	}
+	if events[0].Stage != "plan" {
+		t.Errorf("refusal event stage = %q, want plan", events[0].Stage)
+	}
+	if events[0].Data.Code != "issue-closed" {
+		t.Errorf("refusal event code = %q, want issue-closed", events[0].Data.Code)
+	}
+	if events[0].Data.Reason != rec.Refusal.Reason {
+		t.Errorf("refusal event reason = %q, want %q", events[0].Data.Reason, rec.Refusal.Reason)
+	}
+	if got := events[0].Data.Evidence["state"]; got != "CLOSED" {
+		t.Errorf("refusal event evidence state = %q, want CLOSED", got)
 	}
 }
 
@@ -915,6 +980,37 @@ func TestRunDoubleDashKeepsADashTask(t *testing.T) {
 	}
 }
 
+// TestRefusalRecordedKeepsARefusedRunGoing pins the caller's rule, which is the
+// half of #59 a test of the record alone cannot see: a refusal the record holds
+// goes on to Finish even when its event was lost, and a refusal the record
+// cannot hold stops the caller instead of writing an outcome with no reason.
+func TestRefusalRecordedKeepsARefusedRunGoing(t *testing.T) {
+	r, err := runrec.New(filepath.Join(t.TempDir(), "run"), runrec.Meta{Kind: "run", Subject: "t"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	led, err := runrec.OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+	if err != nil {
+		t.Fatalf("OpenLedger: %v", err)
+	}
+	// A closed stream stands in for a write that fails: the refusal is in
+	// run.json by then, and only its event has nowhere to land.
+	if err := led.Close(); err != nil {
+		t.Fatalf("close ledger: %v", err)
+	}
+	r.SetLedger(led)
+
+	if !refusalRecorded(r, refuse.New(refuse.SandboxUnavailable, "sandbox", "no namespace on this host")) {
+		t.Fatal("a lost event must not stop the run before Finish")
+	}
+	if refusalRecorded(r, refuse.New(refuse.Code("not-in-the-vocabulary"), "sandbox", "x")) {
+		t.Fatal("a refusal the record cannot hold must stop the caller")
+	}
+	if !refusalRecorded(nil, nil) {
+		t.Fatal("an unrecorded run has nothing to stop for")
+	}
+}
+
 // TestRunRecordsARefusedNamespace is the record side of the hole Detect cannot
 // see: bwrap answers its own probe and then refuses this run's mounts. The run
 // is refused at exit 3 with a code in run.json, not recorded as a container run
@@ -944,5 +1040,18 @@ func TestRunRecordsARefusedNamespace(t *testing.T) {
 	}
 	if !strings.Contains(rec.Refusal.Reason, "Permission denied") {
 		t.Errorf("refusal reason = %q, want bwrap's own words", rec.Refusal.Reason)
+	}
+	// The refusal is decided before the run has a command to make, and it is
+	// still an event: the stream exists from the record, not from the first
+	// command, so a reader following it sees the stop.
+	events := refusalEvents(t, onlyRunDir(t, base))
+	if len(events) != 1 {
+		t.Fatalf("refusal events = %d, want exactly one", len(events))
+	}
+	if events[0].Stage != "sandbox" {
+		t.Errorf("refusal event stage = %q, want sandbox", events[0].Stage)
+	}
+	if events[0].Data.Code != "sandbox-unavailable" {
+		t.Errorf("refusal event code = %q, want sandbox-unavailable", events[0].Data.Code)
 	}
 }
