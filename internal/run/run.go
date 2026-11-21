@@ -69,6 +69,10 @@ type Meta struct {
 type Run struct {
 	ID  string
 	Dir string
+	// stream is the run's event stream when a caller attached one. Refuse
+	// appends to it, so a refusal sits in the same file as the events that led
+	// to it rather than in run.json alone.
+	stream *Ledger
 }
 
 // record is run.json. The field order is the file's field order, fixed so that
@@ -194,8 +198,23 @@ func (r *Run) Refuse(ref *refusal.Refusal) error {
 		Reason:   ref.Reason,
 		Evidence: ref.Evidence,
 	}
-	return writeRecord(r.Dir, *rec)
+	if err := writeRecord(r.Dir, *rec); err != nil {
+		return err
+	}
+	// The stream carries the same refusal, so a reader following the run's
+	// events sees where it stopped without opening run.json. It is appended
+	// after the record: an event about a refusal the record does not hold would
+	// be the only account of it, and the record is the one that counts.
+	if r.stream != nil {
+		return r.stream.Refusal(ref)
+	}
+	return nil
 }
+
+// SetLedger attaches the run's event stream, which Refuse appends its event to.
+// A run with no stream records a refusal in run.json alone, which is all a
+// caller that never opened one can offer.
+func (r *Run) SetLedger(l *Ledger) { r.stream = l }
 
 // Finish writes the run's terminal outcome: the state its exit code stands for,
 // and the code itself. It runs once the result is known and before the process

@@ -117,12 +117,30 @@ func runAgent(ctx context.Context, args []string) int {
 	}
 
 	var rec *runrec.Run
+	var led *runrec.Ledger
 	if *runDir != "" {
 		rec, err = runrec.New(*runDir, runrec.Meta{Kind: "run", Subject: task, Repo: wd, Sandbox: string(mode)})
 		if err != nil {
 			return fail(err)
 		}
 		fmt.Printf("Run: %s\nDir: %s\n\n", rec.ID, rec.Dir)
+		// The stream is opened with the record rather than with the first
+		// command, because a refusal is an event too: a run that refuses before
+		// it ever ran a command still has to say so in the file a reader follows.
+		// It is closed after the last command, so a run killed mid-command still
+		// leaves the events of the commands before it.
+		led, err = runrec.OpenLedger(filepath.Join(rec.Dir, "run.ndjson"))
+		if err != nil {
+			// The run is over before it began, and its record must say so: a
+			// run.json left at running for a process that exited is the state
+			// Finish exists to prevent.
+			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
+				return code
+			}
+			return fail(fmt.Errorf("open record: %w", err))
+		}
+		defer closeRecord(led)
+		rec.SetLedger(led)
 	}
 	// A refusal is a finished run, so it gets a record with its own state rather
 	// than a directory that says running for a process that already exited.
@@ -177,22 +195,9 @@ func runAgent(ctx context.Context, args []string) int {
 		}
 	}
 	// A command is the run's most consequential act, so its record belongs to
-	// the run rather than to the process that happened to run it. The stream is
-	// opened before the first command and closed after the last, so a run that
-	// is killed mid-command still leaves the events of the commands before it.
-	// An unrecorded run has nowhere to put them and, as before, keeps nothing.
-	if rec != nil {
-		led, err := runrec.OpenLedger(filepath.Join(rec.Dir, "run.ndjson"))
-		if err != nil {
-			// The run is over before it began, and its record must say so: a
-			// run.json left at running for a process that exited is the state
-			// Finish exists to prevent.
-			if code := finishRun(rec, report.ExitCode(err)); code != 0 {
-				return code
-			}
-			return fail(fmt.Errorf("open record: %w", err))
-		}
-		defer closeRecord(led)
+	// the run rather than to the process that happened to run it. An unrecorded
+	// run has nowhere to put its events and, as before, keeps nothing.
+	if led != nil {
 		registry.SetLedger(led)
 	}
 	result, err := runAudited(ctx, wd, task, model, registry)
@@ -547,6 +552,20 @@ func work(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	fmt.Printf("Run: %s\nDir: %s\n\n", r.ID, r.Dir)
+	// Every recorded run has one stream, opened with the record. This command
+	// writes no command events yet, so what the stream holds today is the
+	// refusal — and a refusal that only existed in run.json would leave the
+	// events file a reader follows with no account of why the run stopped.
+	led, err := runrec.OpenLedger(filepath.Join(r.Dir, "run.ndjson"))
+	if err != nil {
+		if err := r.Finish(report.ExitCode(err)); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-runner: record run outcome: %v\n", err)
+			return 1
+		}
+		return fail(fmt.Errorf("open record: %w", err))
+	}
+	defer closeRecord(led)
+	r.SetLedger(led)
 	// A refusal is a finished run, so it gets a record with its own state rather
 	// than a directory that says running for a process that already exited.
 	if modeErr != nil {
