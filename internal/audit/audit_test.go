@@ -18,6 +18,13 @@ func write(t *testing.T, path, content string) {
 	}
 }
 
+// runIgnores is the exclusion list a run under home would use, with its state
+// base resolved the way internal/run resolves it.
+func runIgnores(home string) []Ignore {
+	stateBase := filepath.Join(home, ".local", "state")
+	return Ignores(home, stateBase, filepath.Join(stateBase, "agent-runner", "runs", "one"))
+}
+
 func take(t *testing.T, paths []string, ignores []Ignore) Snapshot {
 	t.Helper()
 	snap, err := Take(paths, ignores)
@@ -42,7 +49,7 @@ func findDrift(drift []Drift, want string) (Drift, bool) {
 // children can name it.
 func TestEscapeFileIsNamed(t *testing.T) {
 	home := t.TempDir()
-	ignores := Ignores(home, filepath.Join(home, "state"))
+	ignores := runIgnores(home)
 	write(t, filepath.Join(home, ".config", "app.conf"), "x")
 	before := take(t, []string{home}, ignores)
 
@@ -62,7 +69,7 @@ func TestCleanRunHasNoDrift(t *testing.T) {
 	home := t.TempDir()
 	write(t, filepath.Join(home, "notes.txt"), "hello")
 	write(t, filepath.Join(home, ".config", "app.conf"), "x")
-	ignores := Ignores(home, filepath.Join(home, "state"))
+	ignores := runIgnores(home)
 	before := take(t, []string{home}, ignores)
 	after := take(t, []string{home}, ignores)
 	if drift := Compare(before, after); len(drift) != 0 {
@@ -114,15 +121,34 @@ func TestChangedFileReportsSizeAndTime(t *testing.T) {
 	}
 }
 
+// TestNestedFileEditIsInvisible pins the depth this audit watches, so the wiring
+// in #85 is written against the real boundary and not against the old comment.
+// A file one level below a root carries a name and no size, so editing it in
+// place moves neither: it is a blind spot by design, and a change that shrinks it
+// has to change this test on purpose.
+func TestNestedFileEditIsInvisible(t *testing.T) {
+	home := t.TempDir()
+	file := filepath.Join(home, ".config", "authorized_keys")
+	write(t, file, "ssh-ed25519 AAAA one")
+	before := take(t, []string{home}, nil)
+
+	write(t, file, "ssh-ed25519 AAAA two")
+	after := take(t, []string{home}, nil)
+	if drift := Compare(before, after); len(drift) != 0 {
+		t.Fatalf("editing %s in place produced %v; the audit watches one level deep", file, drift)
+	}
+}
+
 // TestRunDirectoryIsExcluded proves the one write the run is allowed to make is
 // invisible to the audit, and that the walk never enters it.
 func TestRunDirectoryIsExcluded(t *testing.T) {
 	home := t.TempDir()
-	runDir := filepath.Join(home, ".local", "state", "agent-runner", "runs", "one")
+	stateBase := filepath.Join(home, ".local", "state")
+	runDir := filepath.Join(stateBase, "agent-runner", "runs", "one")
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		t.Fatalf("mkdir run: %v", err)
 	}
-	ignores := Ignores(home, runDir)
+	ignores := Ignores(home, stateBase, runDir)
 	before := take(t, []string{home}, ignores)
 	write(t, filepath.Join(runDir, "REPORT.md"), "the run wrote this")
 	after := take(t, []string{home}, ignores)
@@ -141,7 +167,7 @@ func TestRunDirectoryIsExcluded(t *testing.T) {
 // cache is not an escape, and saying so in code is what keeps the audit usable.
 func TestNamedExclusions(t *testing.T) {
 	home := t.TempDir()
-	ignores := Ignores(home, filepath.Join(home, "state"))
+	ignores := runIgnores(home)
 	before := take(t, []string{home}, ignores)
 	write(t, filepath.Join(home, ".cache", "chrome", "Cache", "data_0"), "cache")
 	after := take(t, []string{home}, ignores)
@@ -152,8 +178,15 @@ func TestNamedExclusions(t *testing.T) {
 	if ignored("/home/agent-other/notes.txt", ignores) {
 		t.Fatal("an exclusion leaked into a neighbouring directory")
 	}
-	if !ignored(filepath.Join(home, "state", "REPORT.md"), ignores) {
+	if !ignored(filepath.Join(home, ".local", "state", "agent-runner", "runs", "one", "REPORT.md"), ignores) {
 		t.Fatal("a path inside the run directory was not excluded")
+	}
+	// Only this program's own directory is excluded. State another program
+	// owns sits outside the run like any other write, and must stay visible:
+	// excluding all of the state base is how a hole the size of a state tree
+	// gets blessed with a reason.
+	if ignored(filepath.Join(home, ".local", "state", "other", "note.json"), ignores) {
+		t.Fatal("an unrelated program's state was excluded from the audit")
 	}
 }
 

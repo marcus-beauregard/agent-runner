@@ -4,9 +4,13 @@
 //
 // It is a tripwire, not an integrity monitor: each watchlist root is walked one
 // level deep, recording file sizes and, for directories, the names of their
-// children. A new file is then a new name in its parent and an edited file is a
-// changed size. Content hashes, inodes and writes reverted before the second
-// snapshot are out of scope; the container sandbox is the other net (§6.2).
+// children. A file added or removed at that depth is a name that moved in its
+// parent; a file edited in place is a changed size only when it sits directly in
+// a root. A file one level down carries a name and no size, so editing
+// ~/.config/app.conf in place is invisible — that is the depth this tripwire
+// watches, not a claim that it can see every write. Content hashes, inodes and
+// writes reverted before the second snapshot are out of scope; the container
+// sandbox is the other net (§6.2).
 package audit
 
 import (
@@ -72,14 +76,17 @@ func Watchlist(home, repo string) []string {
 	return dedup(paths)
 }
 
-// Ignores is the default exclusion list for a run in runDir whose record lives
-// under home. The run directory comes first: it is the one exclusion that is not
-// about the OS at all.
-func Ignores(home, runDir string) []Ignore {
+// Ignores is the default exclusion list for a run in runDir whose records live
+// under stateBase/agent-runner. The run directory comes first: it is the one
+// exclusion that is not about the OS at all. The program's own bookkeeping is
+// excluded by its exact directory rather than by all of stateBase: state another
+// program owns is a write outside the run like any other, and the audit has to
+// see it.
+func Ignores(home, stateBase, runDir string) []Ignore {
 	return []Ignore{
 		{Prefix: runDir, Why: "the run's own directory is where it is supposed to write"},
 		{Prefix: filepath.Join(home, ".cache"), Why: "caches are rewritten by every tool that runs; a cache write is not an escape"},
-		{Prefix: filepath.Join(home, ".local", "state"), Why: "this program's run records live here and the audit must not flag its own bookkeeping"},
+		{Prefix: filepath.Join(stateBase, "agent-runner"), Why: "this program's run records live here and the audit must not flag its own bookkeeping"},
 		{Prefix: filepath.Join(home, ".npm"), Why: "the npm cache is scratch space the toolchain owns"},
 	}
 }
