@@ -338,11 +338,7 @@ func CleanupWorktree(runDir string, code int) error {
 	// Settled is a claim about the tree, not about the exit code. The checkout
 	// is scratch only when everything in it is on the branch; a change that was
 	// never committed exists nowhere else, and --force would discard it.
-	clean, err := worktreeClean(wt)
-	if err == nil && !clean {
-		err = errors.New("worktree has uncommitted changes")
-	}
-	if err != nil {
+	if err := worktreeSettled(wt, rec.Branch); err != nil {
 		data.Error = err.Error()
 		if aerr := appendWorktreeEvent(runDir, kindWorktreeRemove, data); aerr != nil {
 			return fmt.Errorf("remove worktree: %w (recording it also failed: %v)", err, aerr)
@@ -362,20 +358,39 @@ func CleanupWorktree(runDir string, code int) error {
 	return nil
 }
 
-// worktreeClean reports whether a checkout holds nothing that is not on its
-// branch. A tree that is already gone has nothing left to lose, which is the
-// same answer for this caller: the removal only has a registration to prune.
-func worktreeClean(wt string) (bool, error) {
+// worktreeSettled returns why a checkout is not safe to discard, or nil when
+// nothing in it exists outside its branch. A tree that is already gone has
+// nothing left to lose, which is the same answer for this caller: the removal
+// only has a registration to prune.
+//
+// Clean is not enough on its own. A commit made on a detached HEAD is clean and
+// belongs to no branch, and --force would leave it as a dangling object. The
+// head has to be the branch the run was given before the tree can be called
+// scratch.
+func worktreeSettled(wt, branch string) error {
 	if _, err := os.Lstat(wt); errors.Is(err, os.ErrNotExist) {
-		return true, nil
+		return nil
 	} else if err != nil {
-		return false, err
+		return err
+	}
+	head, err := gitRun(wt, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return fmt.Errorf("read worktree head: %w", err)
+	}
+	if head == "HEAD" {
+		return errors.New("worktree is on a detached HEAD")
+	}
+	if branch != "" && head != branch {
+		return fmt.Errorf("worktree is on %s, not %s", head, branch)
 	}
 	out, err := gitRun(wt, "status", "--porcelain")
 	if err != nil {
-		return false, fmt.Errorf("read worktree status: %w", err)
+		return fmt.Errorf("read worktree status: %w", err)
 	}
-	return out == "", nil
+	if out != "" {
+		return errors.New("worktree has uncommitted changes")
+	}
+	return nil
 }
 
 // appendWorktreeEvent adds one worktree event to the run's stream. It opens the

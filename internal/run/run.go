@@ -107,6 +107,13 @@ func New(base string, meta Meta) (*Run, error) {
 		return nil, err
 	}
 	dir := filepath.Join(root, id)
+	// The directory is a location, and every path derived from it is resolved
+	// by a different process with a different working directory: git runs in
+	// the parent, the guard in the caller's. An absolute path is the only
+	// spelling they all agree on, so the run owns one from the start.
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("run %s already exists: %w", id, err)

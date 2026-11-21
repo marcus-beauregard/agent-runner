@@ -706,3 +706,77 @@ func TestFinishMarksTheRunFailedWhenCleanupFails(t *testing.T) {
 		t.Errorf("payload exit code = %d, want the code the run reached (0)", payload.ExitCode)
 	}
 }
+
+// TestWorktreePathIsAbsoluteFromARelativeBase is the two-working-directories
+// bug: git runs in the parent and resolves the path it is handed against it,
+// while the guard and the removal resolve the same string against the caller's
+// cwd. A relative --run-dir makes those different places, and the guard then
+// stats nothing while --force deletes the tree. The run directory is absolute
+// from the moment it is created, so every derivation agrees.
+func TestWorktreePathIsAbsoluteFromARelativeBase(t *testing.T) {
+	parent := worktreeParent(t)
+	root := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	r, err := New("state", Meta{Kind: "build", Subject: cageSubject, Repo: parent})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !filepath.IsAbs(r.Dir) {
+		t.Fatalf("run dir %q is not absolute: its worktree path is resolved against two working directories", r.Dir)
+	}
+	if _, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID)); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	writeTestFile(t, filepath.Join(wt, "only-copy.txt"), "wip\n")
+	if err := r.Finish(0); err == nil {
+		t.Fatal("Finish(0) = nil: a relative run dir let cleanup discard an uncommitted change")
+	}
+	if _, err := os.Stat(filepath.Join(wt, "only-copy.txt")); err != nil {
+		t.Errorf("the only copy is gone: %v", err)
+	}
+}
+
+// TestFinishKeepsADetachedHeadWorktree is clean but not settled: a commit made
+// on a detached HEAD passes git status and belongs to no branch, so --force
+// would leave it as a dangling object nobody can find. The head has to be the
+// run's branch before the checkout counts as scratch.
+func TestFinishKeepsADetachedHeadWorktree(t *testing.T) {
+	parent := worktreeParent(t)
+	r := newWorktreeRun(t, parent, cageSubject)
+	branch, _, err := Worktree(r.Dir, parent, Slug(cageSubject, r.ID))
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	wt := filepath.Join(r.Dir, "worktree")
+	mustGit(t, wt, "checkout", "-q", "--detach")
+	writeTestFile(t, filepath.Join(wt, "precious.txt"), "work\n")
+	mustGit(t, wt, "add", ".")
+	mustGit(t, wt, "commit", "-q", "-m", "work on a detached head")
+
+	err = r.Finish(0)
+	if err == nil {
+		t.Fatal("Finish(0) = nil, want the detached head to stop the cleanup")
+	}
+	if !strings.Contains(err.Error(), "detached") {
+		t.Errorf("error = %q, want it to name the detached head", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "precious.txt")); err != nil {
+		t.Errorf("cleanup discarded a commit that is on no branch: %v", err)
+	}
+	if _, err := mustGitErr(parent, "show", branch+":precious.txt"); err == nil {
+		t.Errorf("%s:precious.txt exists, so the test did not put the commit on no branch", branch)
+	}
+}
