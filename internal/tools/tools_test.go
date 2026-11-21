@@ -317,6 +317,48 @@ func TestRecordsCommandExit(t *testing.T) {
 	}
 }
 
+// A refused command must not be recorded as a clean exit: the process can
+// exit 0 while its output is thrown away, which is exactly what the ledger has
+// to say out loud.
+func TestRefusedOutputIsRecorded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), make([]byte, 2*1024*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	if _, err := r.Run(context.Background(), toolRunCommand, map[string]any{"command": "cat big.txt"}); err == nil {
+		t.Fatal("command over the output cap returned a nil error")
+	}
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	exit, ok := led.events[0].data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", led.events[0].data)
+	}
+	if exit.Refused != "output-limit" {
+		t.Fatalf("recorded refused %q, want %q", exit.Refused, "output-limit")
+	}
+	if exit.ExitCode != 0 {
+		t.Fatalf("recorded exit code %d, want the process's own 0", exit.ExitCode)
+	}
+}
+
+// A ledger that fails while the command also fails must report both, not drop
+// the record error on the floor.
+func TestRecordFailureSurvivesCommandFailure(t *testing.T) {
+	r := newRegistry(t)
+	r.SetLedger(&fakeLedger{err: errors.New("disk full")})
+	_, err := run(t, r, "cat missing-file")
+	wantErr(t, err, "record cmd:exit: disk full")
+	wantErr(t, err, "command failed")
+}
+
 func TestRecordFailureFailsTheCommand(t *testing.T) {
 	r := newRegistry(t)
 	r.SetLedger(&fakeLedger{err: errors.New("disk full")})

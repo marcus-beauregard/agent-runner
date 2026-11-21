@@ -21,7 +21,7 @@ var ErrLedgerClosed = errors.New("ledger closed")
 type Event struct {
 	Seq   int64           `json:"seq"`             // increases across a run, including after a resume
 	TS    time.Time       `json:"ts"`              // UTC
-	Kind  string          `json:"kind"`            // "stage", "tool", "decision", "gate", "trigger", "state"
+	Kind  string          `json:"kind"`            // "stage", "tool", "cmd:exit", "decision", "gate", "trigger", "state"
 	Stage string          `json:"stage,omitempty"` // the stage an event belongs to, if any
 	Data  json.RawMessage `json:"data"`            // the payload
 }

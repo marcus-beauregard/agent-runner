@@ -48,13 +48,16 @@ type Ledger interface {
 // commandExit is the payload of a cmd:exit event: the command's name, the argv
 // that was executed (never the environment), and how it ended. Killed names
 // why the group was killed — "timeout", "canceled", or a signal — and ExitCode
-// is -1 then, because a killed process has no exit status of its own.
+// is -1 then, because a killed process has no exit status of its own. Refused
+// names why the tool rejected a result the process produced — "output-limit" or
+// "wait-delay" — so a record never reads as success for a call that failed.
 type commandExit struct {
 	Name       string   `json:"name"`
 	Argv       []string `json:"argv"`
 	DurationMS int64    `json:"duration_ms"`
 	ExitCode   int      `json:"exit_code"`
 	Killed     string   `json:"killed,omitempty"`
+	Refused    string   `json:"refused,omitempty"`
 }
 
 // Registry is a set of tools confined to a single working directory.
@@ -399,24 +402,35 @@ func (r *Registry) runCommand(ctx context.Context, args map[string]any) (string,
 	if killed != "" {
 		code = -1
 	}
+	// Decide the outcome before recording it. The ledger is the run's evidence:
+	// an event that asserts a clean exit for a call the tool refused would be a
+	// lie, and the exit code alone cannot carry that — the process may well have
+	// exited 0 while its output was thrown away.
+	var outErr error
+	refused := ""
+	switch {
+	case stdout.exceeded || stderr.exceeded:
+		refused, outErr = "output-limit", errors.New("command output exceeds 1 MiB limit")
+	case killed == "timeout":
+		outErr = errors.New("command timed out")
+	case errors.Is(runErr, exec.ErrWaitDelay):
+		refused, outErr = "wait-delay", errors.New("command left a child holding its output; the process group was killed")
+	case runErr != nil:
+		outErr = fmt.Errorf("command failed: %w", runErr)
+	}
 	recordErr := r.record(commandExit{
 		Name:       argv[0],
 		Argv:       argv,
 		DurationMS: duration.Milliseconds(),
 		ExitCode:   code,
 		Killed:     killed,
+		Refused:    refused,
 	})
-	if stdout.exceeded || stderr.exceeded {
-		return "", errors.New("command output exceeds 1 MiB limit")
-	}
-	if runErr != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", errors.New("command timed out")
+	if outErr != nil {
+		if recordErr != nil {
+			return "", fmt.Errorf("%w (record %s: %v)", outErr, kindCommandExit, recordErr)
 		}
-		if errors.Is(runErr, exec.ErrWaitDelay) {
-			return "", errors.New("command left a child holding its output; the process group was killed")
-		}
-		return "", fmt.Errorf("command failed: %w", runErr)
+		return "", outErr
 	}
 	if recordErr != nil {
 		return "", fmt.Errorf("record %s: %w", kindCommandExit, recordErr)

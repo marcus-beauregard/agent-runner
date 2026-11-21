@@ -104,10 +104,14 @@ func TestTimeoutKillsTheProcessGroup(t *testing.T) {
 	led := &fakeLedger{}
 	r.SetLedger(led)
 	r.SetTimeout(toolRunCommand, 250*time.Millisecond)
-	_, err := run(t, r, `sh -c "echo $$ > self.pid; sleep 300"`)
+	_, err := run(t, r, `sh -c "sleep 300 & echo $! > child.pid; echo $$ > self.pid; wait"`)
 	wantErr(t, err, "command timed out")
+	// The leader alone proves nothing: exec.CommandContext's default kill
+	// satisfies that. The child is what makes this a test of the group.
+	dead := readPID(t, r.root, "child.pid")
 	pid := readPID(t, r.root, "self.pid")
 	waitGone(t, pid)
+	waitGone(t, dead)
 	if len(led.events) != 1 {
 		t.Fatalf("recorded %d events, want 1", len(led.events))
 	}
@@ -120,6 +124,29 @@ func TestTimeoutKillsTheProcessGroup(t *testing.T) {
 	}
 }
 
+// A command whose child keeps the output pipe open fails with ErrWaitDelay.
+// The process itself exited 0, so the record has to name the refusal rather
+// than let exit_code 0 read as success.
+func TestWaitDelayIsRecorded(t *testing.T) {
+	allowShell(t)
+	r := newRegistry(t)
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	_, err := run(t, r, `sh -c "sleep 300 & echo $! > child.pid; echo done"`)
+	wantErr(t, err, "left a child holding its output")
+	waitGone(t, readPID(t, r.root, "child.pid"))
+	if len(led.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(led.events))
+	}
+	exit, ok := led.events[0].data.(commandExit)
+	if !ok {
+		t.Fatalf("event payload is %T, want commandExit", led.events[0].data)
+	}
+	if exit.Refused != "wait-delay" {
+		t.Fatalf("recorded refused %q, want %q", exit.Refused, "wait-delay")
+	}
+}
+
 func TestCancelKillsTheProcessGroup(t *testing.T) {
 	allowShell(t)
 	r := newRegistry(t)
@@ -129,13 +156,15 @@ func TestCancelKillsTheProcessGroup(t *testing.T) {
 	time.AfterFunc(250*time.Millisecond, cancel)
 	defer cancel()
 	_, err := r.Run(ctx, toolRunCommand, map[string]any{
-		"command": `sh -c "echo $$ > self.pid; sleep 300"`,
+		"command": `sh -c "sleep 300 & echo $! > child.pid; echo $$ > self.pid; wait"`,
 	})
 	if err == nil {
 		t.Fatal("canceled command returned a nil error")
 	}
 	pid := readPID(t, r.root, "self.pid")
+	dead := readPID(t, r.root, "child.pid")
 	waitGone(t, pid)
+	waitGone(t, dead)
 	if len(led.events) != 1 {
 		t.Fatalf("recorded %d events, want 1", len(led.events))
 	}
