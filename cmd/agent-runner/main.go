@@ -17,6 +17,7 @@ import (
 	"github.com/marcus-beauregard/agent-runner/internal/agent"
 	"github.com/marcus-beauregard/agent-runner/internal/report"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
+	"github.com/marcus-beauregard/agent-runner/internal/sandbox"
 	"github.com/marcus-beauregard/agent-runner/internal/tools"
 )
 
@@ -115,6 +116,7 @@ func work(ctx context.Context, args []string) int {
 	gate := fs.String("gate", "", "the command that decides whether the work is done")
 	dryRun := fs.Bool("dry-run", false, "plan only; write nothing")
 	runDir := fs.String("run-dir", "", "base directory for the run record; no record is written unless it is set")
+	sandboxMode := fs.String("sandbox", sandbox.Auto, "isolation mode: auto, container or worktree")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			usage(os.Stdout)
@@ -132,7 +134,21 @@ func work(ctx context.Context, args []string) int {
 		return 1
 	}
 
+	// The mode is decided before anything is written, because it is part of what
+	// the record claims the run was. A refusal that is not a refusal of this
+	// ticket's kind — a mode that does not exist — is a usage error and gets no
+	// record: nothing ran, and a record of nothing is noise.
+	_, warn, modeErr := sandbox.Resolve(ctx, *sandboxMode, sandbox.Detect)
+	if modeErr != nil && !errors.Is(modeErr, report.ErrRefused) {
+		return fail(modeErr)
+	}
+	if warn != "" {
+		fmt.Fprintf(os.Stderr, "agent-runner: warning: %s\n", warn)
+	}
 	if *runDir == "" {
+		if modeErr != nil {
+			return fail(modeErr)
+		}
 		return planAndPrint(ctx, ref, *repo, *gate)
 	}
 	r, err := runrec.New(*runDir, runrec.Meta{Kind: "build", Subject: ref, Repo: *repo})
@@ -140,6 +156,15 @@ func work(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	fmt.Printf("Run: %s\nDir: %s\n\n", r.ID, r.Dir)
+	// A refusal is a finished run, so it gets a record with its own state rather
+	// than a directory that says running for a process that already exited.
+	if modeErr != nil {
+		if err := r.Finish(report.ExitCode(modeErr)); err != nil {
+			fmt.Fprintf(os.Stderr, "agent-runner: record run outcome: %v\n", err)
+			return 1
+		}
+		return fail(modeErr)
+	}
 	code := planAndPrint(ctx, ref, *repo, *gate)
 	if err := r.Finish(code); err != nil {
 		// The run happened; the record of how it ended did not. Say so instead of
@@ -251,7 +276,8 @@ func usage(w io.Writer) {
 
 Usage:
   agent-runner run <task>                                        run the offline mock agent
-  agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>] --dry-run
+  agent-runner work <issue-url> --repo <path> [--gate <cmd>] [--run-dir <dir>]
+                   [--sandbox auto|container|worktree] --dry-run
                                                                  plan the work, writing nothing but the run record
   agent-runner report <id> [--run-dir <dir>]                     print REPORT.md for a recorded run
   agent-runner replay <run-dir>                                  prove a finished run's action set from its record
