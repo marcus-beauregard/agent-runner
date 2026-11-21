@@ -72,6 +72,21 @@ func TestEnvRefusesWithoutGhCredential(t *testing.T) {
 	}
 }
 
+// TestEnvRefusesWithoutPath is the refusal the allowlist itself implies: a
+// child with no search path cannot find the binary it was asked to run, so an
+// environment missing PATH is a refusal and not a run that fails later with a
+// confusing exit code.
+func TestEnvRefusesWithoutPath(t *testing.T) {
+	t.Setenv("PATH", "")
+	_, err := Env(t.TempDir(), creds())
+	if !errors.Is(err, report.ErrRefused) {
+		t.Fatalf("error = %v, want a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "PATH") {
+		t.Fatalf("error = %q, want it to name PATH", err)
+	}
+}
+
 // TestEnvChildSeesTMPDIRAndNoParentSecrets is the ticket's done-when: a real
 // child prints a TMPDIR under the run directory, and a secret planted in the
 // parent does not appear in what the child sees.
@@ -304,5 +319,44 @@ func TestRegistryRecordsScrubbedEnv(t *testing.T) {
 	}
 	if entry, ok := led.events[0].data.(commandExit); !ok || entry.Env != "" {
 		t.Fatalf("recorded env = %q, want empty for an inherited environment", entry.Env)
+	}
+}
+
+// TestRegistryRedactsSecretsInArgv is the other half of the record's honesty:
+// a command whose argv repeats a secret must reach the ledger without it. The
+// assertion is on what runCommand recorded, not on redactArgv, so dropping the
+// redaction from the call site fails here even though the helper still works.
+func TestRegistryRedactsSecretsInArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the operand names a file a token is pasted into")
+	}
+	runDir := t.TempDir()
+	env, err := Env(runDir, creds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRegistry(t)
+	for _, name := range []string{"GH_TOKEN=" + creds().Token, creds().Token} {
+		if err := os.WriteFile(filepath.Join(r.root, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	led := &fakeLedger{}
+	r.SetLedger(led)
+	r.SetEnv(env)
+
+	if _, err := run(t, r, "cat GH_TOKEN="+creds().Token+" "+creds().Token); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := led.events[0].data.(commandExit)
+	if !ok {
+		t.Fatalf("recorded %T, want commandExit", led.events[0].data)
+	}
+	want := []string{"cat", "GH_TOKEN=" + redacted, redacted}
+	if got := strings.Join(entry.Argv, " "); got != strings.Join(want, " ") {
+		t.Fatalf("recorded argv = %q, want %q", got, strings.Join(want, " "))
+	}
+	if strings.Contains(strings.Join(entry.Argv, " "), creds().Token) {
+		t.Fatalf("the ledger carries the token: %q", entry.Argv)
 	}
 }
