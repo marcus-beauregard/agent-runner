@@ -82,8 +82,12 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.AgentsForbidden},
 		},
 		{
-			cause: "the gate runs, but a program it calls is not in the environment — the shell said 127, and the refusal names the program",
+			cause: "the gate runs, but the shell could not run a program it calls — 127 for absent, 126 for not executable — and the record keeps what the shell said",
 			codes: []refuse.Code{refuse.GateUnavailable},
+		},
+		{
+			cause: "the gate needs a host outside the network allowlist to pass",
+			codes: []refuse.Code{refuse.HostNotAllowed},
 		},
 		{
 			cause: "the diff would touch a path outside the write scope",

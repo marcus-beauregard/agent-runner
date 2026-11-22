@@ -52,7 +52,7 @@ Nothing chooses which of the three pipelines to run. That is the caller's job, a
 
 ### The thread is the unit, even for one command
 
-A command takes one URL and follows the thread from it: the issue and the pull requests that cite it, together, with whatever the ledger already knows. A maintainer answering the issue changes what an open PR should say, and a review on the PR can make the issue's original ask obsolete. Neither can be judged from one URL alone, and reading the other side costs one API call.
+A pipeline command takes one URL and follows the thread from it: the issue and the pull requests that cite it, together, with whatever the ledger already knows. A maintainer answering the issue changes what an open PR should say, and a review on the PR can make the issue's original ask obsolete. Neither can be judged from one URL alone, and reading the other side costs one API call.
 
 Where a thread disagrees with the command, the command loses:
 
@@ -133,7 +133,7 @@ Three ways to read the same events:
 
 - **run.ndjson** for machines. One JSON object per line, append-only, flushed as it happens, so a truncated file loses only its tail.
 - **REPORT.md** for people, rendered from the same events by `agent-runner report <id>`.
-- **`--json`** at exit, one object: run id, mode, status, exit code, gate result, report path, PR URL if any. No TTY assumptions, no prompts, no colour.
+- **`--json`** at exit, one object: run id, mode, status, exit code, gate result, report path, PR URL if any. A command that ends before a run exists — `env-check`, `env-init`, or any exit `6` — prints one JSON object with no run id: the repo, the digest, and what is missing or was planned (§6.4). No TTY assumptions, no prompts, no colour.
 
 Runs live outside the repo on purpose. A `.agent-runner/` directory inside every checkout is one careless `git add -A` away from committing a transcript containing paths, code and half-finished reasoning. The repo gets at most a single gitignored pointer listing run ids, and the runner works fine without it.
 
@@ -159,7 +159,7 @@ Each run gets its own worktree. Never the user's checkout, never a shared tree.
 - If the repo is missing, clone it. If it exists, use it only as the object store.
 - `git worktree add <run>/worktree -b agent/<slug> origin/<default>` — a fresh branch, always.
 - The run's write scope is that directory and nothing else. The existing argv-only command runner already confines the working directory; the PR must not be the first time we learn it did not.
-- Commands run with a scrubbed environment. Only what `gh` and `git` need to authenticate, and the transcript records that a command ran, never what it carried.
+- Commands run with a scrubbed environment. Only what `gh` and `git` need to authenticate, plus the anchor the environment sets (§6.4) — `PATH` into `envs/<digest>/bin` and its install prefixes. The runner exports that anchor; it is never inherited from the operator's shell, and the transcript records that a command ran, never what it carried.
 
 ### 6.2 The machine, not just the files
 
@@ -168,7 +168,7 @@ A worktree confines the diff. It does not confine the process, and the process i
 The rule is therefore about the host, not the checkout: **a run changes nothing on this machine outside its own run directory.** Concretely:
 
 - **No writes outside the run directory.** Not `$HOME`, not `/etc`, not a neighbouring repo, not the package manager's global store. `TMPDIR` is set to a directory inside the run and inherited by children, so a tool that wants scratch space gets it there.
-- **No installs, no services, no schedulers.** A run installs nothing on this host. The toolchain it needs was provisioned before it started, by a command that is not a run (§6.4), and is bound in read-only. A gate that meets a program the environment does not have is a refusal (§11), not an invitation to `apt-get install` something. The worker never starts a daemon, edits a crontab, or registers a git hook in the parent repo beyond the worktree entry it cleans up.
+- **No installs, no services, no schedulers.** A run installs nothing on this host. The toolchain it needs was provisioned before it started, by a command that is not a run (§6.4), and is read-only to the run. A gate that meets a program the environment does not have is a refusal (§11), not an invitation to `apt-get install` something. The worker never starts a daemon, edits a crontab, or registers a git hook in the parent repo beyond the worktree entry it cleans up.
 - **No long-lived processes.** Every command runs under a timeout, in its own process group, and the group is killed on exit. A command that tries to daemonise is killed with its children; a run never leaves something behind holding a port.
 - **Network is an allowlist, not the internet.** `github.com` for `gh` and `git`, plus the model endpoint, and nothing else. A test that reaches a real service is exactly the class of test that should not run unattended, and an issue body that instructs the worker to fetch a URL does not get to become a request.
 - **The blast radius should be a namespace, not a convention.** `--sandbox container` (bubblewrap or `unshare` when present) is the default where the kernel allows it; `--sandbox worktree` is the fallback and prints a warning naming what is unenforced. Convention is not isolation; the flag exists so the weaker mode is a visible choice.
@@ -181,19 +181,20 @@ This is separate from §12's "the issue body is data, not instructions": that ru
 Nothing deletes anything on a timer. Cleanup is a command a person or a scheduler runs, in the same spirit as everything else here: one invocation, one job, exit.
 
 ```
-agent-runner gc [--apply] [--runs <days>] [--worktrees <days>] [--json]
+agent-runner gc [--apply] [--runs <days>] [--worktrees <days>] [--envs <days>] [--json]
 ```
 
 Default is a dry run. It prints every candidate with its size and the reason it qualifies, and deletes nothing until `--apply` is passed.
 
-Two tiers, because they cost different things to lose.
+Three tiers, because they cost different things to lose.
 
 | Tier | What goes | Default age | Why |
 |---|---|---|---|
 | **Worktree** | `worktree/` and its git registration | exit 0, as the run's last step; otherwise merged/closed or 14 days | Large (hundreds of MB), regenerable from the branch once the work is on it |
 | **Run record** | the whole run directory | 90 days, or the newest 50 runs | Small, and it is the history |
+| **Environment** | `envs/<digest>` | 30 days unused, or all but the newest few per repo; never a digest a run is bound to or a lock is held on | The largest thing this tool creates, and regenerable by `env-init` from a declaration it can still read |
 
-Losing a worktree costs a re-clone. Losing a run record costs the reason a decision was made, so the two are never deleted under the same policy and the record always outlives the checkout.
+Losing a worktree costs a re-clone. Losing a run record costs the reason a decision was made, so the two are never deleted under the same policy and the record always outlives the checkout. An environment costs a re-provision, and the run record that names its digest outlives it too: `env-check` on a collected digest says not ready, never a run that finds half a toolchain.
 
 A run whose work is settled gives its tree back itself. Exit 0 is the only code whose change reached the branch, so the checkout is scratch from that moment, and the run removes it as its last recorded step — `worktree:remove` in the stream, next to the `worktree:add` that made it. Every other ending keeps its tree for `gc`, by age: the gate runs before the commit stage, so a run that failed (1), was refused by the gate (2) or policy (3), or stopped for a person (4) may be holding the only copy of the attempt and of why it was stopped, and a resume needs the tree it was editing. A run with no terminal state is resumable and is never a cleanup candidate.
 
@@ -208,11 +209,11 @@ Rules it will not break:
 
 A repo declares what it takes to build and test it, and a run on a machine that cannot execute that declaration produces nothing worth reviewing. So the environment is an input, handled like the worktree: named, recorded, and prepared before the run rather than improvised inside it.
 
-- **Declared, not discovered.** The declaration is what the repo already says — `go.mod`'s go directive, `package.json`'s engines, package manager and lockfile, `rust-toolchain.toml`, `.python-version` or `requires-python`, the base image a `Dockerfile` names — plus an optional `agent-runner.env.toml` for what those cannot express: system packages, services, environment variables. Each entry keeps the file that justified it, so `env-init` can say why it wants to install something. A repo that declares nothing has an empty declaration and a digest, not an error; `env-init` is the command that refuses.
+- **Declared, not discovered.** The declaration is what the repo already says — `go.mod`'s go directive, `package.json`'s engines, package manager and lockfile, `rust-toolchain.toml`, `.python-version` or `requires-python`, the base image a `Dockerfile` names — plus an optional `agent-runner.env.toml` for what those cannot express: system packages, services, environment variables. Each entry keeps the file that justified it, so `env-init` can say why it wants to install something. A repo that declares nothing has an empty declaration and a digest, not an error: there is nothing to verify, so `env-check` is satisfied and `env-init` plans nothing. The gate is then the only thing that can tell that host from a provisioned one.
 - **A digest names it.** The digest is a hash over the normalised declaration and the bytes of the declaring files: an edit that changes nothing that matters leaves it alone, a version bump changes it. The decision is a comparison, not a judgement — `env-check` asks whether the directory at that digest exists and is intact, and a run records the digest it was bound to.
-- **It lives in the state dir, and nothing enters the host.** `${XDG_STATE_HOME:-~/.local/state}/agent-runner/envs/<digest>/` holds `env.json` (the declaration, the resolved tools and versions, sizes, when it was built), `bin/`, `lib/` and `share/`. Every tool in it was installed inside that directory — `PATH`, `GOPATH`, `CARGO_HOME`, `npm_config_prefix` all point into it — never into `$HOME`, `/usr/local` or the system package manager. It is built in a temporary sibling and renamed on success, as the run record is, so a failed init leaves no half-environment that `env-check` could accept.
-- **Read-only in the run.** `--sandbox container` binds `envs/<digest>` read-only at `/opt/env` and puts `/opt/env/bin` first on `PATH`; the run's `TMPDIR` stays inside the run, not the environment. `--sandbox worktree` gets the same `PATH` prefix and nothing else, and says so in the record, which is the honesty §6.1 already applies to the diff. `run.json` gains `env_digest`, so a run names its environment the way it names its branch and base sha.
-- **Shared without contention.** Being read-only, one environment serves every run on its digest: no lock, no per-run copy, no warm-up step. An environment that is missing or torn when a run starts is exit `6` before any work, never a run that discovers half a toolchain at the gate.
+- **It lives in the state dir, and nothing enters the host.** `${XDG_STATE_HOME:-~/.local/state}/agent-runner/envs/<digest>/` holds `env.json` (the declaration, the resolved tools and versions, sizes, when it was built), `bin/`, `lib/` and `share/`. Every tool in it was installed inside that directory — `PATH` and each ecosystem's install prefix point into it, and `env-init` is what put them there — never into `$HOME`, `/usr/local` or the system package manager. It is built in a temporary sibling and renamed on success, as the run record is, so a failed init leaves no half-environment that `env-check` could accept.
+- **Read-only in the run.** `--sandbox container` binds `envs/<digest>` read-only at `/opt/env` and puts `/opt/env/bin` first on `PATH`. `--sandbox worktree` gets the same `PATH` prefix and no bind; what holds there is the no-write bits `env-init` left on the directory, and the record says so, which is the honesty §6.1 already applies to the diff. Either way the run's `TMPDIR` stays inside the run, and so does every writable cache a tool insists on — `GOCACHE`, cargo's cache, the npm cache — because Go, cargo and npx all write at build time, and a shared tree they can write to is a tree one run can poison for the next. A cold cache per run is the price of that. `run.json` gains `env_digest`, so a run names its environment the way it names its branch and base sha.
+- **Shared without contention.** Being read-only — a bind in container mode, no-write bits outside it — one environment serves every run on its digest: no per-run copy, no warm-up step. A reader takes a lock in the environment and `gc` never removes one it cannot take (§6.3), so the only writer and the only deleter cannot meet a run. An environment that is missing or torn when a run starts is exit `6` before any work, never a run that discovers half a toolchain at the gate.
 - **Provisioning is a command, and it is recorded.** `env-init` is the only thing that writes under `envs/`, and what it did is an artifact inside the environment: `env.json`, plus `env.ndjson` with one line per step. A run reads that record; it never writes it. The trust it asks for, downloading a toolchain and choosing its source, is why it is a command someone ran with a plan to read first, and not a side effect of a pipeline.
 
 ## 7. Pipeline: `build` (issue to PR)
@@ -282,6 +283,7 @@ The gate is the repo's, quoted, not paraphrased.
 - Every gate records its command, exit code, duration and the tail of its output. Gates that never ran are recorded too, with the reason they were skipped.
 - No `--gate` and the run stops after the patch and asks for one. "Tests pass" is not a gate; a command and an exit code are.
 - Running the whole list is the default and needs no flag.
+- A gate the shell could not run is not a failing gate. When the shell reports 127 or 126, the run refuses (§11, exit `3`) and records the shell's own message; a test that ran and failed stays exit `2`. A missing program is the machine's answer; a red test is the patch's.
 
 ## 10. Budgets and terminal states
 
@@ -300,14 +302,15 @@ The worker refuses, with a printed reason, when:
 - the issue is closed, already fixed by a merged PR, or claimed by another person;
 - the task needs a CLA the operator has not signed;
 - the repo's CONTRIBUTING forbids unattended agents;
-- the gate runs, but a program it calls is not in the environment — the shell said 127, and the refusal names the program;
+- the gate runs, but the shell could not run a program it calls — 127 for absent, 126 for not executable — and the record keeps what the shell said;
+- the gate needs a host outside the network allowlist to pass;
 - the diff would touch a path outside the write scope;
 - a command tries to write outside the run directory, or reach a host outside the network allowlist;
 - `resolve` is pointed at a PR we do not own;
 - a thread's PR was closed without merging, and the next step would be a replacement PR.
 - the route implies `--force` and the pipeline's preconditions do not hold.
 
-A missing *environment* is not one of these. It is exit `6` at the front door (§6.4), before the run starts: the answer is `env-init`, not a different subject, and §13 keeps the two codes apart. A test that can only reach the network is still a refusal.
+A missing *environment* is not one of these. It is exit `6` at the front door (§6.4), before the run starts: the answer is `env-init`, not a different subject, and §13 keeps the two codes apart. A test that can only pass by reaching the open internet is the allowlist bullet, not a red test.
 
 A refusal is a successful run. Stopping costs a maintainer nothing; a confident wrong PR costs them a review.
 
@@ -338,6 +341,8 @@ A refusal is a successful run. Stopping costs a maintainer nothing; a confident 
 
 `6` is not `3`. A caller that sees `3` changes the subject; a caller that sees `6` provisions the environment and calls the same command again with the same arguments. Two codes whose next step differs that much cannot be one code.
 
+A command that ends at `6` writes no run: there is nothing to record yet, and `--json` carries the repo, the digest and what is missing (§4) instead of a run id.
+
 ## 14. Non-goals
 
 - Autonomy across many issues at once. Serial first.
@@ -356,7 +361,7 @@ Scheduling a `resolve` every ten minutes, holding a queue of issues, enforcing o
 
 The contract between the two is deliberately small:
 
-- a pipeline command takes a URL and a repo path, and exits with a code from §13;
+- a pipeline command takes a URL and a repo path, the provisioning commands take a repo path, and both exit with a code from §13;
 - `--json` on stdout describes what happened, in a shape that does not change between runs;
 - a run record on disk describes how it happened, and can be replayed.
 
