@@ -30,7 +30,7 @@ const (
 	ClaimedByOther        Code = "claimed-by-other"       // someone else is on it
 	CLAUnsigned           Code = "cla-unsigned"           // the task needs a CLA nobody signed
 	AgentsForbidden       Code = "agents-forbidden"       // CONTRIBUTING forbids unattended agents
-	DependencyUnavailable Code = "dependency-unavailable" // a dependency resolves off the fetch list
+	DependencyUnavailable Code = "dependency-unavailable" // the declaration names a source off the fetch list
 	GateUnavailable       Code = "gate-unavailable"       // a program the gate called could not run
 	OutsideWriteScope     Code = "outside-write-scope"    // the diff would leave the write scope
 	OutsideRunDir         Code = "outside-run-dir"        // a command wrote outside the run directory
