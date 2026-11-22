@@ -43,6 +43,7 @@ type Issue struct {
 	Title     string
 	State     string
 	Assignees []string
+	Labels    []string
 }
 
 // Plan is the M0 deliverable: what would be done, and nothing that was done.
@@ -112,7 +113,35 @@ func Work(ctx context.Context, ref, repo, gate string) (Plan, error) {
 		refusal.Evidence = map[string]string{"pull_request": merged.URL, "state": "MERGED"}
 		return plan, refusal
 	}
+	if bad := unwanted(issue.Labels); len(bad) > 0 {
+		refusal := refuse.New(refuse.RefusedByLabel, "plan",
+			fmt.Sprintf("issue is labelled %s", strings.Join(bad, ", ")))
+		refusal.Evidence = map[string]string{"labels": strings.Join(bad, ", ")}
+		return plan, refusal
+	}
 	return plan, nil
+}
+
+// refusalLabels is the closed list of labels that say a maintainer has already
+// stopped this thread. It is a list rather than a suffix match because a label
+// is only a refusal when someone meant it as one: a repo's own
+// "invalid-configuration" is a description, not a decision.
+var refusalLabels = []string{"wontfix", "needs-discussion", "invalid"}
+
+// unwanted returns the labels from the closed list that are on the issue, in the
+// order GitHub returned them and spelled as GitHub spells them. Matching is
+// exact and case-insensitive, so WontFix refuses and wontfix-candidate does not.
+func unwanted(labels []string) []string {
+	var bad []string
+	for _, label := range labels {
+		for _, stop := range refusalLabels {
+			if strings.EqualFold(label, stop) {
+				bad = append(bad, label)
+				break
+			}
+		}
+	}
+	return bad
 }
 
 // pullRequest is a pull request GitHub links to an issue, once it has merged.
@@ -127,6 +156,12 @@ type ghAssignee struct {
 	Login string `json:"login"`
 }
 
+// ghLabel is one entry of the issue's labels: gh returns a list of objects, and
+// the name is the only field this package reads.
+type ghLabel struct {
+	Name string `json:"name"`
+}
+
 // ghPRRef is one entry of the issue's closedByPullRequestsReferences: a pull
 // request that names the issue and would close it, whatever its state.
 type ghPRRef struct {
@@ -139,7 +174,7 @@ type ghPRRef struct {
 // first linked pull request that has merged, if any.
 func fetchIssue(ctx context.Context, gh, ref string) (Issue, *pullRequest, error) {
 	out, err := exec.CommandContext(ctx, gh, "issue", "view", ref,
-		"--json", "number,title,state,assignees,closedByPullRequestsReferences").Output()
+		"--json", "number,title,state,assignees,labels,closedByPullRequestsReferences").Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return Issue{}, nil, fmt.Errorf("gh issue view: %s", strings.TrimSpace(string(ee.Stderr)))
@@ -151,6 +186,7 @@ func fetchIssue(ctx context.Context, gh, ref string) (Issue, *pullRequest, error
 		Title     string       `json:"title"`
 		State     string       `json:"state"`
 		Assignees []ghAssignee `json:"assignees"`
+		Labels    []ghLabel    `json:"labels"`
 		ClosedBy  []ghPRRef    `json:"closedByPullRequestsReferences"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -160,11 +196,15 @@ func fetchIssue(ctx context.Context, gh, ref string) (Issue, *pullRequest, error
 	for _, a := range raw.Assignees {
 		assignees = append(assignees, a.Login)
 	}
+	labels := make([]string, 0, len(raw.Labels))
+	for _, l := range raw.Labels {
+		labels = append(labels, l.Name)
+	}
 	merged, err := mergedOf(ctx, gh, raw.ClosedBy)
 	if err != nil {
 		return Issue{}, nil, err
 	}
-	return Issue{Title: raw.Title, State: raw.State, Assignees: assignees}, merged, nil
+	return Issue{Title: raw.Title, State: raw.State, Assignees: assignees, Labels: labels}, merged, nil
 }
 
 // mergedOf returns the first linked pull request that has already merged. Each
