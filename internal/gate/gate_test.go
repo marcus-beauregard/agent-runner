@@ -21,6 +21,7 @@ func TestRunReadsWhatTheShellSaid(t *testing.T) {
 		name            string
 		command         string
 		goMod           bool
+		script          bool
 		path            []string
 		wantExit        int
 		wantMissing     []string
@@ -83,6 +84,13 @@ func TestRunReadsWhatTheShellSaid(t *testing.T) {
 			wantUnavailable: true,
 		},
 		{
+			name:            "a program the checkout lost the exec bit on",
+			command:         "./gate.sh",
+			script:          true,
+			wantExit:        126,
+			wantUnavailable: true,
+		},
+		{
 			name:            "a program inside a substitution",
 			command:         "echo \"$(cloc .)\"",
 			wantExit:        0,
@@ -123,6 +131,11 @@ func TestRunReadsWhatTheShellSaid(t *testing.T) {
 			if tc.goMod {
 				if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test\n"), 0o600); err != nil {
 					t.Fatalf("write go.mod: %v", err)
+				}
+			}
+			if tc.script {
+				if err := os.WriteFile(filepath.Join(dir, "gate.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+					t.Fatalf("write gate.sh: %v", err)
 				}
 			}
 			t.Setenv("PATH", onlyPath(t, tc.path...))

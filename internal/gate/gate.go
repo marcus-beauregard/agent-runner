@@ -71,12 +71,15 @@ type Result struct {
 }
 
 // Unavailable reports whether the gate never ran the programs it names: the
-// shell exited 127, or it reported a program it could not find and the gate
-// failed as well. An exit of 0 with a missing program is not unavailable — the
-// caller wrote a gate whose status is not that program's — and belongs in the
-// record as a warning rather than a refusal.
+// shell exited 127 or 126, or it reported a program it could not find and the
+// gate failed as well. 127 is a program the shell could not find; 126 is one it
+// found and could not execute, which a lost exec bit or a noexec mount makes of
+// a checkout's own script. Either way the code was never given the chance to be
+// wrong. An exit of 0 with a missing program is not unavailable — the caller
+// wrote a gate whose status is not that program's — and belongs in the record
+// as a warning rather than a refusal.
 func (r Result) Unavailable() bool {
-	return r.Exit == 127 || (r.Exit != 0 && len(r.Missing) > 0)
+	return r.Exit == 126 || r.Exit == 127 || (r.Exit != 0 && len(r.Missing) > 0)
 }
 
 // Run executes one gate command under /bin/sh in dir and reports what it did.
