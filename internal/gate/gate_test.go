@@ -205,6 +205,34 @@ func TestRunTailIsTheEnd(t *testing.T) {
 	}
 }
 
+// TestTailKeepsTheEndOfALongLine: a line longer than the window must not take
+// the window with it. The cut looks for a newline to start on; when the only
+// newline left is the window's last byte, starting there would keep nothing,
+// and the record would claim the gate printed nothing.
+func TestTailKeepsTheEndOfALongLine(t *testing.T) {
+	var w tailWriter
+	if _, err := w.Write([]byte("before\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	long := strings.Repeat("x", 9000) + "\n"
+	if _, err := w.Write([]byte(long)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := w.tail()
+	if got == "" {
+		t.Fatal("tail is empty; a long line must not discard the window")
+	}
+	if strings.Contains(got, "before") {
+		t.Errorf("tail = %.20q..., want only the end of the long line", got)
+	}
+	if !strings.HasSuffix(got, "xxx") {
+		t.Errorf("tail = %.20q..., want the long line's end", got)
+	}
+	if len(got) > tailBytes {
+		t.Errorf("tail has %d bytes, want at most %d", len(got), tailBytes)
+	}
+}
+
 // TestRunGateThatCannotStartIsAnError: the exit code is the gate's answer, so
 // a gate that never started has none. Reporting -1 as if the command had said
 // something would put a refusal's evidence on a shell that was never there.
