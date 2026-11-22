@@ -924,6 +924,52 @@ func TestWorkProceedsPastAnUnmergedLinkedPR(t *testing.T) {
 	}
 }
 
+// TestWorkRefusesAGateItCannotRun: the gate is the repo's own command, copied
+// from its CI. When this host lacks a program the gate names, the run refuses
+// with gate-unavailable instead of planning work whose proof cannot exist. The
+// distinction matters at the code a caller sees: a gate that never ran is exit
+// 3, not exit 2, so nobody blames the patch for the machine (PRD §13).
+func TestWorkRefusesAGateItCannotRun(t *testing.T) {
+	base := t.TempDir()
+	stubPATH(t, map[string]string{"gh": ghStub})
+	ref := "https://example.test/issues/27"
+	gate := "go vet ./... && cloc ."
+	if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run", "--gate", gate}); code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	rec := onlyRun(t, base)
+	dir, err := runrec.Locate(base, rec.ID)
+	if err != nil {
+		t.Fatalf("locate run: %v", err)
+	}
+	checkRefusal(t, dir, rec, refusalCase{
+		name:     "gate cannot run",
+		code:     "gate-unavailable",
+		reason:   "gate cannot run: go, cloc are not on PATH",
+		evidence: map[string]string{"gate": gate, "missing": "go, cloc"},
+	})
+}
+
+// TestWorkProceedsWhenTheGateCanRun is the other half: the check is about the
+// host, not the command. A gate whose programs are on PATH is planned normally,
+// whether or not those programs would pass — nothing here runs the gate, and a
+// check that did would be the gate stage wearing a plan's clothes.
+func TestWorkProceedsWhenTheGateCanRun(t *testing.T) {
+	base := t.TempDir()
+	stubPATH(t, map[string]string{"gh": ghStub, "go": "#!/bin/sh\nexit 0\n"})
+	ref := "https://example.test/issues/27"
+	if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run", "--gate", "go vet ./..."}); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.Refusal != nil {
+		t.Errorf("refusal = %+v, want none", rec.Refusal)
+	}
+	if rec.State != "done" {
+		t.Errorf("state = %q, want done", rec.State)
+	}
+}
+
 // checkRefusal asserts one refusal everywhere a reader meets it: the record, the
 // report, and the stream. All three have to agree on the code, the stage and the
 // words, or the record is a summary of a refusal rather than the refusal.

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/marcus-beauregard/agent-runner/internal/gate"
 	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
@@ -72,12 +73,13 @@ func (p Plan) String() string {
 
 // Work runs the M0 dry-run: read the issue with gh if it can, then produce a
 // plan. It writes nothing and creates no branch. A refusal — gh unavailable,
-// an unreadable issue, or one that is closed, already fixed by a merged pull
-// request, or already claimed — is returned as a typed *refuse.Refusal,
-// alongside the best plan we can still print, so the caller can record why the
-// run stopped instead of only that it did.
-func Work(ctx context.Context, ref, repo, gate string) (Plan, error) {
-	plan := Plan{Ref: ref, Gate: gate}
+// an unreadable issue, one that is closed, already fixed by a merged pull
+// request, or already claimed, or a gate whose programs this host does not
+// have — is returned as a typed *refuse.Refusal, alongside the best plan we can
+// still print, so the caller can record why the run stopped instead of only
+// that it did.
+func Work(ctx context.Context, ref, repo, gateCmd string) (Plan, error) {
+	plan := Plan{Ref: ref, Gate: gateCmd}
 	gh, err := exec.LookPath("gh")
 	if err != nil {
 		plan.Scope = "(gh CLI unavailable)"
@@ -112,7 +114,28 @@ func Work(ctx context.Context, ref, repo, gate string) (Plan, error) {
 		refusal.Evidence = map[string]string{"pull_request": merged.URL, "state": "MERGED"}
 		return plan, refusal
 	}
+	// The gate is the last thing checked, because a gate that cannot run is a
+	// fact about this host and the issue's state is a fact about the work: when
+	// both are wrong, the more fundamental reason is the one a person needs.
+	if missing := gate.Missing(gateCmd); len(missing) > 0 {
+		refusal := refuse.New(refuse.GateUnavailable, "plan", gateUnavailableReason(missing))
+		refusal.Evidence = map[string]string{
+			"gate":    gateCmd,
+			"missing": strings.Join(missing, ", "),
+		}
+		return plan, refusal
+	}
 	return plan, nil
+}
+
+// gateUnavailableReason names the program the host lacks, because that is what
+// the operator can install. Blaming the gate command or the sandbox would leave
+// them reading a command line they already copied correctly.
+func gateUnavailableReason(missing []string) string {
+	if len(missing) == 1 {
+		return fmt.Sprintf("gate cannot run: %s is not on PATH", missing[0])
+	}
+	return fmt.Sprintf("gate cannot run: %s are not on PATH", strings.Join(missing, ", "))
 }
 
 // pullRequest is a pull request GitHub links to an issue, once it has merged.
