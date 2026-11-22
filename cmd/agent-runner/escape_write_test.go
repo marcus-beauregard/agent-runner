@@ -25,10 +25,11 @@ func (e escapeLLM) Complete(ctx context.Context, prompt string) (string, error) 
 // run must refuse it, name the path in the report, and leave nothing behind.
 //
 // The run directory is a plain directory under a temp parent, not a checkout:
-// the parent is not on the audit's watchlist, so an exit code of 0 here would
-// mean the escape had succeeded somewhere nothing was looking. That is the
-// point of the fixture — the tool refusal is the only thing between the attempt
-// and the host, and this is the test that says so.
+// the parent is not on the audit's watchlist, so nothing but the tool refusal
+// stands between the attempt and the host. That is the point of the fixture.
+// The absence of parent/escape.txt is what proves it; the exit code alone would
+// not, because this model never says DONE, so even a successful write would end
+// at the step cap (exit 4) rather than 0.
 //
 // The literal "echo x > ../escape.txt" from the plan cannot be expressed: the
 // command runner has no shell, so ">" is rejected in the tokenizer before any
