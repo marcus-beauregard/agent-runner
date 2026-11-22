@@ -884,7 +884,15 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 			evidence: map[string]string{"error": ""},
 		},
 		{
-			name:     "gate cannot run",
+			name:     "one gate program missing",
+			path:     map[string]string{"gh": ghStub},
+			gate:     "go vet ./...",
+			code:     "gate-unavailable",
+			reason:   "gate cannot run: go is not on PATH",
+			evidence: map[string]string{"gate": "go vet ./...", "missing": "go"},
+		},
+		{
+			name:     "two gate programs missing",
 			path:     map[string]string{"gh": ghStub},
 			gate:     "go vet ./... && cloc .",
 			code:     "gate-unavailable",

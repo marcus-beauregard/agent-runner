@@ -45,6 +45,7 @@ var keywords = map[string]bool{
 // of these is its own segment, so bailing on the opening word loses nothing.
 var openers = map[string]bool{
 	"for": true, "while": true, "until": true, "select": true,
+	"case": true, "esac": true,
 }
 
 // Missing returns the programs the gate command names that this host cannot
@@ -136,6 +137,12 @@ func program(seg string) string {
 	for _, f := range words {
 		if keywords[f] || isAssignment(f) {
 			continue
+		}
+		// An option belongs to the word before it, and a comment is not a
+		// command: neither can name a program, and both appear in a gate copied
+		// from a CI file ("time -p go test", a leading "# run the suite").
+		if strings.HasPrefix(f, "-") || strings.HasPrefix(f, "#") {
+			return ""
 		}
 		if !isProgramName(f) || strings.ContainsRune(f, '/') {
 			return ""

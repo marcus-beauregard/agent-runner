@@ -127,6 +127,24 @@ func TestMissingNamesOnlyWhatTheHostLacks(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "an option after a keyword is not a program",
+			path: []string{"go"},
+			cmd:  "time -p go test ./...",
+			want: nil,
+		},
+		{
+			name: "a comment line is not a program",
+			path: []string{"make"},
+			cmd:  "# run the suite\nmake test",
+			want: nil,
+		},
+		{
+			name: "a case block names no program",
+			path: []string{"go"},
+			cmd:  "case $x in a) go test ./... ;; esac",
+			want: nil,
+		},
+		{
 			name: "two programs missing, in order",
 			path: nil,
 			cmd:  "cloc . && misspell .",

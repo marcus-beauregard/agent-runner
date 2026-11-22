@@ -114,9 +114,9 @@ func Work(ctx context.Context, ref, repo, gateCmd string) (Plan, error) {
 		refusal.Evidence = map[string]string{"pull_request": merged.URL, "state": "MERGED"}
 		return plan, refusal
 	}
-	// The gate is the last thing checked, because a gate that cannot run is a
-	// fact about this host and the issue's state is a fact about the work: when
-	// both are wrong, the more fundamental reason is the one a person needs.
+	// The gate is checked last: when the issue is closed, claimed or already
+	// fixed, that is the answer — planning it is moot, and a missing toolchain on
+	// top of a dead issue is a second problem, not the reason the run stopped.
 	if missing := gate.Missing(gateCmd); len(missing) > 0 {
 		refusal := refuse.New(refuse.GateUnavailable, "plan", gateUnavailableReason(missing))
 		refusal.Evidence = map[string]string{
