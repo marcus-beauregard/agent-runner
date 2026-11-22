@@ -22,8 +22,8 @@ var ErrRefused = errors.New("refused")
 type Code string
 
 // The vocabulary. The first block is PRD §11's list, one code per cause it
-// names; the second block holds the two causes the binary produces today that
-// §11 implies without naming.
+// names; the second block holds the two the binary produces today that §11
+// does not name.
 const (
 	IssueClosed        Code = "issue-closed"        // the issue is closed
 	AlreadyFixed       Code = "already-fixed"       // a merged PR already fixed it
