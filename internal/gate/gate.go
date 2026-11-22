@@ -25,12 +25,11 @@ import (
 const shell = "/bin/sh"
 
 // keywords open a command rather than name one; the word after them is the
-// program, so "if go test" is a check on go. "function" is here for the
-// definition itself: the name it defines is not a program until it is called.
+// program, so "if go test" is a check on go. "function" is not here: a
+// definition is not a command this package can read at all, and definesFunction
+// is what decides that, for either spelling of it.
 var keywords = map[string]bool{
-	"if": true, "then": true, "else": true, "elif": true,
-	"for": true, "while": true, "until": true, "do": true, "!": true,
-	"time": true, "function": true,
+	"if": true, "!": true, "time": true,
 }
 
 // openers begin a compound command whose next word is a variable or a
@@ -40,6 +39,13 @@ var keywords = map[string]bool{
 var openers = map[string]bool{
 	"for": true, "while": true, "until": true, "select": true,
 	"case": true, "esac": true,
+	// A branch word opens a command that runs only if the guard above it held:
+	// "if command -v cloc; then cloc .; fi" names cloc twice, and the second
+	// time it is conditional. Reading it as an unconditional program is the
+	// false refusal this package exists to avoid, so its body is a silent miss
+	// instead — the guard already asked the question the lookup would ask.
+	"then": true, "else": true, "elif": true, "do": true,
+	"fi": true, "done": true, "}": true,
 }
 
 // Missing returns the programs the gate command names that this host cannot
@@ -57,6 +63,13 @@ var openers = map[string]bool{
 // shell resolves against a worktree that does not exist yet. A miss is silent;
 // a false refusal is not.
 func Missing(cmd string) []string {
+	if strings.Contains(cmd, "<<") {
+		// A heredoc body is data, and its delimiter is not a program: the
+		// "EOF" in "cat > /tmp/x <<EOF" would otherwise be looked up and
+		// missed. Every line of a gate that carries one is unread, which is
+		// a silent miss rather than a refusal for a program that never existed.
+		return nil
+	}
 	var missing []string
 	seen := map[string]bool{}
 	for _, seg := range segments(cmd) {
@@ -94,6 +107,9 @@ func resolvable(prog string) bool {
 // has run, so a gate that defines one is not a gate this package can read, and
 // a call to it later in the same line would look like a missing program.
 func definesFunction(seg string) bool {
+	if w := words(seg); len(w) > 0 && w[0] == "function" {
+		return true // "function ci { ... }" defines the same thing as "ci() { ... }"
+	}
 	open := strings.IndexByte(seg, '(')
 	if open <= 0 {
 		return false

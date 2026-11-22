@@ -169,6 +169,30 @@ func TestMissingNamesOnlyWhatTheHostLacks(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "a function keyword definition is not judged either",
+			path: nil,
+			cmd:  "function ci { go test ./...; }\nci",
+			want: nil,
+		},
+		{
+			name: "a guarded branch is not an unconditional program",
+			path: []string{"go"},
+			cmd:  "if command -v cloc >/dev/null 2>&1; then cloc .; fi",
+			want: nil,
+		},
+		{
+			name: "a condition on a program is still read",
+			path: nil,
+			cmd:  "if go test ./...; then echo ok; fi",
+			want: []string{"go"},
+		},
+		{
+			name: "a heredoc body is not a command",
+			path: []string{"go"},
+			cmd:  "cat > /tmp/x <<EOF\ngo test ./...\nEOF",
+			want: nil,
+		},
+		{
 			name: "a program behind a wrapper is a miss",
 			path: []string{"timeout"},
 			cmd:  "timeout 300 go test ./...",
