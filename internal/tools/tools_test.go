@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 )
 
@@ -226,7 +227,23 @@ func TestReadWriteFileConfinement(t *testing.T) {
 	_, err := r.Run(context.Background(), "read_file", map[string]any{"path": "/etc/passwd"})
 	wantErr(t, err, "path escapes the working directory")
 	_, err = r.Run(context.Background(), "write_file", map[string]any{"path": "../out.txt", "content": "x"})
-	wantErr(t, err, "path escapes the working directory")
+	// A write that leaves the root is a refusal, not an error string: the run
+	// stops on it, and the report has to be able to name what was attempted.
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		t.Fatalf("write_file outside the root = %v, want a *refuse.Refusal", err)
+	}
+	if ref.Code != refuse.OutsideWriteScope {
+		t.Errorf("refusal code = %q, want %q", ref.Code, refuse.OutsideWriteScope)
+	}
+	if got := ref.Evidence["path"]; got != "../out.txt" {
+		t.Errorf("evidence path = %q, want ../out.txt", got)
+	}
+	// The check that refused it is in the evidence, so a reader can see which
+	// rule the path broke without re-running the tool.
+	if got := ref.Evidence["check"]; !strings.Contains(got, "path escapes the working directory") {
+		t.Errorf("evidence check = %q, want the path rule that refused it", got)
+	}
 
 	out, err := r.Run(context.Background(), "write_file", map[string]any{"path": "new.txt", "content": "hello"})
 	if err != nil {
@@ -241,6 +258,102 @@ func TestReadWriteFileConfinement(t *testing.T) {
 	}
 	if out != "hello" {
 		t.Fatalf("read_file returned %q, want %q", out, "hello")
+	}
+}
+
+// TestWriteFileNamesTheEscape pins the other side of write_file's refusal:
+// only a path that actually leaves the root is PRD §11's escape. A ".." that
+// comes back in, or an absolute name that points inside, is a naming mistake
+// the model can correct — it must not end the run as a refusal, and the record
+// must not claim a cause that is not true.
+func TestWriteFileNamesTheEscape(t *testing.T) {
+	r := newRegistry(t)
+	for _, name := range []string{"sub/../ok.txt", filepath.Join(r.root, "abs.txt")} {
+		_, err := r.Run(context.Background(), "write_file", map[string]any{"path": name, "content": "x"})
+		if err == nil {
+			t.Errorf("write_file(%q) = nil, want the name refused", name)
+			continue
+		}
+		var ref *refuse.Refusal
+		if errors.As(err, &ref) {
+			t.Errorf("write_file(%q) = refusal %v, want a plain tool error", name, ref)
+		}
+	}
+}
+
+// TestAbsolutePathIsJudgedAfterResolution pins the two ways an absolute name
+// can lie about where it points. Spelling the path against the root gets both
+// of these backwards, so checkPath resolves it like any other.
+func TestAbsolutePathIsJudgedAfterResolution(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	outside := filepath.Join(dir, "outside")
+	for _, d := range []string{work, outside} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An absolute name that looks like it is under work but follows a symlink
+	// to the outside: a real escape, so it must be a refusal.
+	if err := os.Symlink(outside, filepath.Join(work, "lnk")); err != nil {
+		t.Fatal(err)
+	}
+	// An absolute name outside work that follows a symlink back in: it stays
+	// inside, so it is a naming mistake and must not be a refusal.
+	if err := os.Symlink(work, filepath.Join(dir, "rootlink")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = r.Run(context.Background(), "write_file", map[string]any{
+		"path": filepath.Join(work, "lnk", "evil.txt"), "content": "x",
+	})
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		t.Fatalf("absolute name through a symlink to the outside = %v, want a refusal", err)
+	}
+
+	_, err = r.Run(context.Background(), "write_file", map[string]any{
+		"path": filepath.Join(dir, "rootlink", "ok.txt"), "content": "x",
+	})
+	if err == nil {
+		t.Fatal("absolute name = nil, want it refused as a name")
+	}
+	if errors.As(err, &ref) {
+		t.Errorf("absolute name that resolves inside = refusal %v, want a plain tool error", ref)
+	}
+}
+
+// TestWriteFileFollowsADanglingSymlink is the escape EvalSymlinks alone misses:
+// the link resolves, its target does not exist yet, so the walk sees a missing
+// file inside the root and the write follows the link out of it.
+func TestWriteFileFollowsADanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	outside := filepath.Join(dir, "outside")
+	for _, d := range []string{work, outside} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escaped := filepath.Join(outside, "new.txt")
+	if err := os.Symlink(escaped, filepath.Join(work, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Run(context.Background(), "write_file", map[string]any{"path": "link.txt", "content": "x"})
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		t.Fatalf("write_file through a dangling symlink = %v, want a refusal", err)
+	}
+	if _, statErr := os.Stat(escaped); !os.IsNotExist(statErr) {
+		t.Errorf("the write followed the link outside the root: %v", statErr)
 	}
 }
 

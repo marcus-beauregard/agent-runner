@@ -322,10 +322,16 @@ func isFlagValue(s string) bool {
 	return true
 }
 
+// errOutsideRoot marks the one path failure that really leaves the working
+// directory. checkPath refuses other names too — an absolute one, a ".." that
+// stays inside — but those are naming mistakes the model can correct, so only
+// this sentinel is PRD §11's escape and only it becomes a refusal.
+var errOutsideRoot = errors.New("path escapes the working directory")
+
 // escapes rejects a resolved path that is not the root or a child of it.
 func (r *Registry) escapes(arg, resolved, root string) error {
 	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
-		return fmt.Errorf("path escapes the working directory: %s", arg)
+		return fmt.Errorf("%w: %s", errOutsideRoot, arg)
 	}
 	return nil
 }
@@ -338,22 +344,76 @@ func (r *Registry) escapes(arg, resolved, root string) error {
 // file is reopened by name after the check and a swapped symlink would still
 // win the race.
 func (r *Registry) checkPath(arg string) error {
-	if strings.HasPrefix(arg, "/") || hasDotDot(arg) {
-		return fmt.Errorf("path escapes the working directory: %s", arg)
-	}
+	absolute := strings.HasPrefix(arg, "/")
 	probe := filepath.Join(r.root, arg)
+	if absolute {
+		probe = arg
+	}
+	if !absolute && hasDotDot(arg) {
+		// A ".." that climbs out of the root is an escape; one that comes back
+		// in ("a/../b.txt") is a sloppy name and nothing has left the scope.
+		if joined := filepath.Join(r.root, arg); joined != r.root && !strings.HasPrefix(joined, r.root+string(filepath.Separator)) {
+			return fmt.Errorf("%w: %s", errOutsideRoot, arg)
+		}
+		return fmt.Errorf("path must not contain \"..\": %s", arg)
+	}
+	resolved, err := resolvePath(probe, arg)
+	if err != nil {
+		return err
+	}
+	if err := r.escapes(arg, resolved, r.root); err != nil {
+		return err
+	}
+	if absolute {
+		// The path is inside after resolution, so nothing left the scope; the
+		// name is just not one this tool takes. Spelling alone cannot decide
+		// that: a symlinked ancestor can make an absolute name point either way.
+		return fmt.Errorf("name the path from the working directory, not absolutely: %s", arg)
+	}
+	return nil
+}
+
+// resolvePath follows symlinks at the deepest ancestor of probe that exists and
+// reattaches the part that does not. A symlink is followed even when its target
+// does not exist yet: EvalSymlinks stops at the missing target and would leave
+// the link itself looking like a plain path, so writing through it would land
+// wherever it points. arg is only used in the errors.
+func resolvePath(probe, arg string) (string, error) {
+	return resolveWithin(probe, arg, 0)
+}
+
+// resolveWithin is resolvePath with a hop budget, because a symlink can point
+// at itself or at another link forever.
+func resolveWithin(probe, arg string, hops int) (string, error) {
+	if hops > 32 {
+		return "", fmt.Errorf("too many links: %s", arg)
+	}
 	missing := make([]string, 0)
 	for {
 		real, err := filepath.EvalSymlinks(probe)
 		if err == nil {
-			return r.escapes(arg, filepath.Join(append([]string{real}, missing...)...), r.root)
+			return filepath.Join(append([]string{real}, missing...)...), nil
 		}
 		if !isNotFound(err) {
-			return err
+			return "", err
+		}
+		if info, lerr := os.Lstat(probe); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, rerr := os.Readlink(probe)
+			if rerr != nil {
+				return "", rerr
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(probe), target)
+			}
+			resolved, rerr := resolveWithin(target, arg, hops+1)
+			if rerr != nil {
+				return "", rerr
+			}
+			return filepath.Join(append([]string{resolved}, missing...)...), nil
 		}
 		parent := filepath.Dir(probe)
 		if parent == probe {
-			return fmt.Errorf("path cannot be resolved: %s", arg)
+			return "", fmt.Errorf("path cannot be resolved: %s", arg)
 		}
 		missing = append([]string{filepath.Base(probe)}, missing...)
 		probe = parent
@@ -454,7 +514,21 @@ func (r *Registry) writeFile(ctx context.Context, args map[string]any) (string, 
 		return "", err
 	}
 	if err := r.checkPath(name); err != nil {
-		return "", err
+		// Only the path that actually leaves the working directory is PRD
+		// §11's refusal, and a refusal is not advice: nothing was written, and
+		// the run's answer to an attempt to leave its scope is to stop. A name
+		// checkPath merely dislikes — an absolute one, a ".." that stays inside
+		// — is still a tool error the model can read and correct, so it must
+		// not end the run or be recorded as a cause that is not true.
+		// read_file keeps returning the plain error either way, because §11
+		// refuses a write that leaves the scope, not a read that was rejected.
+		if !errors.Is(err, errOutsideRoot) {
+			return "", err
+		}
+		ref := refuse.New(refuse.OutsideWriteScope, "tool",
+			"write_file would write outside the run directory")
+		ref.Evidence = map[string]string{"path": name, "check": err.Error()}
+		return "", ref
 	}
 	if err := os.WriteFile(filepath.Join(r.root, name), []byte(content), 0o644); err != nil {
 		return "", err

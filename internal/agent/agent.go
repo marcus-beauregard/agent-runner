@@ -5,10 +5,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
 // LLM is the model the loop drives. Complete returns the next reply for a
@@ -87,7 +90,8 @@ func ParseAction(text string, hasTool func(string) bool) (*Action, bool) {
 }
 
 // Run drives the loop to completion or the step cap. Invalid actions and tool
-// errors are observations, not failures; only a model transport error aborts.
+// errors are observations, not failures; only a model transport error or a
+// typed refusal aborts.
 func Run(ctx context.Context, task string, llm LLM, opts Options, ts Toolset) (Result, error) {
 	maxSteps := opts.MaxSteps
 	if maxSteps <= 0 {
@@ -119,6 +123,22 @@ func Run(ctx context.Context, task string, llm LLM, opts Options, ts Toolset) (R
 		}
 		observation, err := ts.Run(ctx, action.Name, action.Args)
 		if err != nil {
+			// A tool that failed is an observation: a command that exited
+			// non-zero, a file that is not there, a path that was wrong — the
+			// model can read that and try something else. A refusal is not
+			// advice. It is the run's answer to what was asked for, and the
+			// model does not get to talk its way around it, so the loop stops
+			// here and the caller records why.
+			//
+			// The gate is the typed refusal, not the sentinel: main records a
+			// *refuse.Refusal and nothing else, so a bare error wrapping
+			// refuse.ErrRefused would stop the run with no reason to print.
+			// That stays an observation until whoever returns it returns a
+			// refusal the record can carry.
+			var ref *refuse.Refusal
+			if errors.As(err, &ref) {
+				return Result{Steps: step + 1, Transcript: transcript}, err
+			}
 			observation = "ERROR: " + err.Error()
 		}
 		transcript = append(transcript, Turn{Role: "tool", Tool: action.Name, Observation: observation})

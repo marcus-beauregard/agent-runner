@@ -2,10 +2,14 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	"github.com/marcus-beauregard/agent-runner/internal/tools"
 )
 
@@ -68,6 +72,95 @@ func (stubTools) Has(name string) bool {
 }
 func (stubTools) Run(ctx context.Context, name string, args map[string]any) (string, error) {
 	return "ok", nil
+}
+
+// refusingTools refuses every call the way the registry refuses an escaping
+// write: with a typed refusal rather than an error string.
+type refusingTools struct{ stubTools }
+
+func (refusingTools) Run(ctx context.Context, name string, args map[string]any) (string, error) {
+	return "", refuse.New(refuse.OutsideWriteScope, "tool", "write_file would write outside the run directory")
+}
+
+// failingTools fails every call the way a command that exits non-zero does:
+// with an ordinary error and no refusal behind it.
+type failingTools struct{ stubTools }
+
+func (failingTools) Run(ctx context.Context, name string, args map[string]any) (string, error) {
+	return "", errors.New("exit status 1")
+}
+
+// TestRefusalStopsTheLoop is the difference between a tool that failed and a
+// run that was refused: the model may adapt to the first, never to the second.
+// The step count is the assertion that matters — a second call would mean the
+// refusal had been handed back as an observation.
+func TestRefusalStopsTheLoop(t *testing.T) {
+	llm := &seqLLM{replies: []string{`write_file {"path":"../escape.txt","content":"x"}`, "DONE"}}
+	res, err := Run(context.Background(), "task", llm, Options{MaxSteps: 10}, refusingTools{})
+	if !errors.Is(err, refuse.ErrRefused) {
+		t.Fatalf("Run error = %v, want a refusal", err)
+	}
+	if res.Done {
+		t.Error("a refused run reported done")
+	}
+	if res.Steps != 1 {
+		t.Errorf("steps = %d, want 1", res.Steps)
+	}
+	if llm.i != 1 {
+		t.Errorf("model called %d times, want 1: the refusal was fed back as an observation", llm.i)
+	}
+	if len(res.Transcript) != 1 || res.Transcript[0].Role != "assistant" {
+		t.Errorf("transcript = %+v, want the one reply that was refused", res.Transcript)
+	}
+}
+
+// TestToolErrorIsAnObservation is the other side: an ordinary tool failure is
+// something the model can read and work around, so the loop keeps going.
+func TestToolErrorIsAnObservation(t *testing.T) {
+	llm := &seqLLM{replies: []string{`run_command {"command":"ls -1"}`, "DONE"}}
+	res, err := Run(context.Background(), "task", llm, Options{MaxSteps: 10}, failingTools{})
+	if err != nil {
+		t.Fatalf("Run error = %v, want the loop to carry on", err)
+	}
+	if !res.Done {
+		t.Error("the loop did not reach DONE after a tool error")
+	}
+	if res.Steps != 2 {
+		t.Errorf("steps = %d, want 2", res.Steps)
+	}
+	if got := res.Transcript[1].Observation; got != "ERROR: exit status 1" {
+		t.Errorf("observation = %q, want the error as text", got)
+	}
+}
+
+// sentinelTools wraps the refusal sentinel the way internal/tools/env.go does:
+// an error that unwraps to refuse.ErrRefused but carries no *refuse.Refusal.
+// The loop has to keep going on it, because the caller records a typed refusal
+// and would have no reason to print for a bare sentinel.
+type sentinelTools struct{ stubTools }
+
+func (sentinelTools) Run(ctx context.Context, name string, args map[string]any) (string, error) {
+	return "", fmt.Errorf("%w: refused", refuse.ErrRefused)
+}
+
+// TestBareSentinelIsAnObservation pins the edge of the gate: only the typed
+// refusal stops the run. A sentinel with nothing to record stays an
+// observation, so exit 3 can never be written without a reason beside it.
+func TestBareSentinelIsAnObservation(t *testing.T) {
+	llm := &seqLLM{replies: []string{`run_command {"command":"ls -1"}`, "DONE"}}
+	res, err := Run(context.Background(), "task", llm, Options{MaxSteps: 10}, sentinelTools{})
+	if err != nil {
+		t.Fatalf("Run error = %v, want the loop to carry on", err)
+	}
+	if !res.Done {
+		t.Error("the loop did not reach DONE after a bare sentinel")
+	}
+	if res.Steps != 2 {
+		t.Errorf("steps = %d, want 2", res.Steps)
+	}
+	if got := res.Transcript[1].Observation; !strings.Contains(got, "refused") {
+		t.Errorf("observation = %q, want the sentinel error as text", got)
+	}
 }
 
 type fixedLLM struct{ reply string }
