@@ -4,9 +4,12 @@
 // never given the chance to be wrong, and saying the tests failed would blame
 // the patch for the machine.
 //
-// The question is put to the shell that runs the gate, not to a list of names
-// kept here: mapfile is a builtin in bash and not in dash, and only the
-// interpreter knows which one it is.
+// The question is put to a shell, not to a list of names kept here: mapfile is
+// a builtin in bash and not in dash, and only an interpreter knows which one it
+// is. The interpreter asked is the one the gate is meant to run under, /bin/sh;
+// a gate written for bash's own syntax is not runnable there either, so leaving
+// it alone here ([[ ]]) or refusing it (mapfile) both match what the run would
+// do.
 package gate
 
 import (
@@ -15,8 +18,10 @@ import (
 	"strings"
 )
 
-// shell is the interpreter a gate runs under. It is an absolute path because
-// the caller's PATH is the thing being questioned.
+// shell is the interpreter the gate stage runs a gate's command line under. It
+// is a constant in one place because this package's answer is only as good as
+// the agreement between the two: an absolute path, because the caller's PATH is
+// the thing being questioned.
 const shell = "/bin/sh"
 
 // keywords open a command rather than name one; the word after them is the
@@ -121,6 +126,21 @@ func segments(cmd string) []string {
 		switch r {
 		case '\'', '"':
 			quote = r
+		case '#':
+			// A comment at the start of a word runs to the end of the line, and
+			// its text is not a command: "go test ./... # done; ok" names one
+			// program, not two.
+			if i > 0 && rs[i-1] != ' ' && rs[i-1] != '\t' && rs[i-1] != '\n' {
+				continue // a '#' inside a word is an argument
+			}
+			segs = append(segs, string(rs[start:i]))
+			for i < len(rs) && rs[i] != '\n' {
+				i++
+			}
+			if i < len(rs) {
+				i++ // the newline ends the comment line and the segment with it
+			}
+			start = i
 		case '\n', ';':
 			segs = append(segs, string(rs[start:i]))
 			start = i + 1
@@ -147,29 +167,40 @@ func segments(cmd string) []string {
 	return append(segs, string(rs[start:]))
 }
 
-// program is the word a segment names as its program: leading assignments
-// (CGO_ENABLED=0), keywords and redirections are skipped. It returns "" for a
-// word this package cannot judge — a quoted or substituted name, a subshell, a
-// redirection, a path — because a gate that cannot be read is not a gate that
-// cannot run.
+// program is the word a segment names as its program: keywords and
+// redirections are skipped. It returns "" for a segment this package cannot
+// judge — a leading assignment, a quoted or substituted name, a subshell, a
+// redirection, a path, a test bracket — because a gate that cannot be read is
+// not a gate that cannot run.
+//
+// A segment that opens with an assignment is unreadable rather than skipped:
+// "PATH=./bin:$PATH toolbox" puts the program somewhere this process's PATH
+// does not reach, and "CGO_ENABLED=0 go test" carries a setting the lookup
+// ignores either way. A miss is silent; a false refusal stops a gate that works.
 //
 // Paths are skipped rather than looked up: "./gradlew" is resolved by the shell
 // against the worktree, and the plan stage has no worktree yet, so a lookup here
-// would answer a question about the operator's cwd. A miss is silent; a false
-// refusal stops a gate that works.
+// would answer a question about the operator's cwd.
 func program(seg string) string {
 	words := words(seg)
 	if len(words) > 0 && openers[words[0]] {
 		return ""
 	}
-	for _, f := range words {
-		if keywords[f] || isAssignment(f) {
+	for i, f := range words {
+		if keywords[f] {
 			continue
 		}
-		// An option belongs to the word before it, and a comment is not a
-		// command: neither can name a program, and both appear in a gate copied
-		// from a CI file ("time -p go test", a leading "# run the suite").
-		if strings.HasPrefix(f, "-") || strings.HasPrefix(f, "#") {
+		if isAssignment(f) {
+			if i == 0 {
+				return "" // the assignment may move the program out of reach
+			}
+			continue
+		}
+		// An option belongs to the word before it, a comment is not a command,
+		// and a bracket is how a shell spells a test: none can name a program,
+		// and all three appear in a gate copied from a CI file ("time -p go
+		// test", a trailing "# done; ok", a bash "[[ -f go.mod ]]").
+		if strings.HasPrefix(f, "-") || strings.HasPrefix(f, "#") || strings.HasPrefix(f, "[") {
 			return ""
 		}
 		if !isProgramName(f) || strings.ContainsRune(f, '/') {
@@ -207,7 +238,7 @@ func words(seg string) []string {
 			quote = r
 			cur = append(cur, r)
 			started = true
-		case r == ' ' || r == '\t' || r == '\r':
+		case r == ' ' || r == '\t' || r == '\r' || r == '\n':
 			flush()
 		default:
 			cur = append(cur, r)

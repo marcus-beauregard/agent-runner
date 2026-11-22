@@ -145,6 +145,24 @@ func TestMissingNamesOnlyWhatTheHostLacks(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "a leading assignment is not read past",
+			path: nil,
+			cmd:  "PATH=/tmp/x:$PATH toolbox check",
+			want: nil,
+		},
+		{
+			name: "a trailing comment is not a command",
+			path: []string{"go"},
+			cmd:  "go test ./... # done; no race",
+			want: nil,
+		},
+		{
+			name: "a bash test bracket is not a program",
+			path: nil,
+			cmd:  "[[ -f go.mod ]]",
+			want: nil,
+		},
+		{
 			name: "a gate that defines a function is not judged",
 			path: nil,
 			cmd:  "ci() { go test ./...; }; ci",
