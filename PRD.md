@@ -159,7 +159,7 @@ Each run gets its own worktree. Never the user's checkout, never a shared tree.
 - If the repo is missing, clone it. If it exists, use it only as the object store.
 - `git worktree add <run>/worktree -b agent/<slug> origin/<default>` — a fresh branch, always.
 - The run's write scope is that directory and nothing else. The existing argv-only command runner already confines the working directory; the PR must not be the first time we learn it did not.
-- Commands run with a scrubbed environment. Only what `gh` and `git` need to authenticate, plus the anchor the environment sets (§6.4) — `PATH` into `envs/<digest>/bin` and its install prefixes. The runner exports that anchor; it is never inherited from the operator's shell, and the transcript records that a command ran, never what it carried.
+- Commands run with a scrubbed environment. Only what `gh` and `git` need to authenticate, plus the anchor an environment sets (§6.4): `PATH` into `envs/<digest>/bin` and its install prefixes. Once a run is bound to an environment, that anchor is set by the runner rather than inherited from the operator's shell, and the transcript records that a command ran, never what it carried.
 
 ### 6.2 The machine, not just the files
 
@@ -192,9 +192,9 @@ Three tiers, because they cost different things to lose.
 |---|---|---|---|
 | **Worktree** | `worktree/` and its git registration | exit 0, as the run's last step; otherwise merged/closed or 14 days | Large (hundreds of MB), regenerable from the branch once the work is on it |
 | **Run record** | the whole run directory | 90 days, or the newest 50 runs | Small, and it is the history |
-| **Environment** | `envs/<digest>` | 30 days unused, or all but the newest few per repo; never a digest a run is bound to or a lock is held on | The largest thing this tool creates, and regenerable by `env-init` from a declaration it can still read |
+| **Environment** | `envs/<digest>` | 30 days since `env.json` was written, or all but the newest few digests; never one a run without a terminal state names, or one whose lock is held | The largest thing this tool creates, and regenerable by `env-init` from a declaration it can still read |
 
-Losing a worktree costs a re-clone. Losing a run record costs the reason a decision was made, so the two are never deleted under the same policy and the record always outlives the checkout. An environment costs a re-provision, and the run record that names its digest outlives it too: `env-check` on a collected digest says not ready, never a run that finds half a toolchain.
+Losing a worktree costs a re-clone. Losing a run record costs the reason a decision was made, so the two are never deleted under the same policy and the record always outlives the checkout. An environment costs a re-provision, and the run record that names its digest outlives it too: `env-check` on a collected digest says not ready, never a run that finds half a toolchain. The store is keyed by digest, not by repo, so the use-clock is the run records that name a digest — a build time for age, a record for use — and a repo's second identical declaration costs nothing.
 
 A run whose work is settled gives its tree back itself. Exit 0 is the only code whose change reached the branch, so the checkout is scratch from that moment, and the run removes it as its last recorded step — `worktree:remove` in the stream, next to the `worktree:add` that made it. Every other ending keeps its tree for `gc`, by age: the gate runs before the commit stage, so a run that failed (1), was refused by the gate (2) or policy (3), or stopped for a person (4) may be holding the only copy of the attempt and of why it was stopped, and a resume needs the tree it was editing. A run with no terminal state is resumable and is never a cleanup candidate.
 
@@ -213,7 +213,7 @@ A repo declares what it takes to build and test it, and a run on a machine that 
 - **A digest names it.** The digest is a hash over the normalised declaration and the bytes of the declaring files: an edit that changes nothing that matters leaves it alone, a version bump changes it. The decision is a comparison, not a judgement — `env-check` asks whether the directory at that digest exists and is intact, and a run records the digest it was bound to.
 - **It lives in the state dir, and nothing enters the host.** `${XDG_STATE_HOME:-~/.local/state}/agent-runner/envs/<digest>/` holds `env.json` (the declaration, the resolved tools and versions, sizes, when it was built), `bin/`, `lib/` and `share/`. Every tool in it was installed inside that directory — `PATH` and each ecosystem's install prefix point into it, and `env-init` is what put them there — never into `$HOME`, `/usr/local` or the system package manager. It is built in a temporary sibling and renamed on success, as the run record is, so a failed init leaves no half-environment that `env-check` could accept.
 - **Read-only in the run.** `--sandbox container` binds `envs/<digest>` read-only at `/opt/env` and puts `/opt/env/bin` first on `PATH`. `--sandbox worktree` gets the same `PATH` prefix and no bind; what holds there is the no-write bits `env-init` left on the directory, and the record says so, which is the honesty §6.1 already applies to the diff. Either way the run's `TMPDIR` stays inside the run, and so does every writable cache a tool insists on — `GOCACHE`, cargo's cache, the npm cache — because Go, cargo and npx all write at build time, and a shared tree they can write to is a tree one run can poison for the next. A cold cache per run is the price of that. `run.json` gains `env_digest`, so a run names its environment the way it names its branch and base sha.
-- **Shared without contention.** Being read-only — a bind in container mode, no-write bits outside it — one environment serves every run on its digest: no per-run copy, no warm-up step. A reader takes a lock in the environment and `gc` never removes one it cannot take (§6.3), so the only writer and the only deleter cannot meet a run. An environment that is missing or torn when a run starts is exit `6` before any work, never a run that discovers half a toolchain at the gate.
+- **Shared without contention.** Being read-only — a bind in container mode, no-write bits outside it — one environment serves every run on its digest: no per-run copy, no warm-up step. A reader takes `envs/<digest>.lock` beside the directory, never inside a tree it cannot write, and holds it for the length of one command, never between runs. `gc` will not remove a digest whose lock it cannot take (§6.3), so the only writer and the only deleter cannot meet a run. An environment that is missing or torn when a run starts is exit `6` before any work, never a run that discovers half a toolchain at the gate.
 - **Provisioning is a command, and it is recorded.** `env-init` is the only thing that writes under `envs/`, and what it did is an artifact inside the environment: `env.json`, plus `env.ndjson` with one line per step. A run reads that record; it never writes it. The trust it asks for, downloading a toolchain and choosing its source, is why it is a command someone ran with a plan to read first, and not a side effect of a pipeline.
 
 ## 7. Pipeline: `build` (issue to PR)
@@ -303,14 +303,13 @@ The worker refuses, with a printed reason, when:
 - the task needs a CLA the operator has not signed;
 - the repo's CONTRIBUTING forbids unattended agents;
 - the gate runs, but the shell could not run a program it calls — 127 for absent, 126 for not executable — and the record keeps what the shell said;
-- the gate needs a host outside the network allowlist to pass;
 - the diff would touch a path outside the write scope;
 - a command tries to write outside the run directory, or reach a host outside the network allowlist;
 - `resolve` is pointed at a PR we do not own;
 - a thread's PR was closed without merging, and the next step would be a replacement PR.
 - the route implies `--force` and the pipeline's preconditions do not hold.
 
-A missing *environment* is not one of these. It is exit `6` at the front door (§6.4), before the run starts: the answer is `env-init`, not a different subject, and §13 keeps the two codes apart. A test that can only pass by reaching the open internet is the allowlist bullet, not a red test.
+A missing *environment* is not one of these. It is exit `6` at the front door (§6.4), before the run starts: the answer is `env-init`, not a different subject, and §13 keeps the two codes apart. A test that can only pass with the open internet is a red test here, exit `2`: the network is closed, so what the run observes is a failing gate, not a request to an off-allowlist host.
 
 A refusal is a successful run. Stopping costs a maintainer nothing; a confident wrong PR costs them a review.
 
@@ -381,7 +380,7 @@ If a scheduler needs more than that, the scheduler is doing something the pipeli
 | Resume and stage idempotency | **missing** |
 | Worktree per run (filesystem scope) | **missing** |
 | Machine isolation: no writes outside, network allowlist, process-group timeouts, container default | **missing** |
-| `gc` with dry run, two tiers, orphan pruning | **missing** |
+| `gc` with dry run, three tiers, orphan pruning | **missing** |
 | Environment as an input: `env-check`, `env-init`, digest and state layout | **missing** |
 | Real LLM client | **missing** — the loop runs on a deterministic mock |
 | Gate runner | **missing** |

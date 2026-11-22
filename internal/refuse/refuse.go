@@ -38,9 +38,10 @@ const (
 	PRClosedUnmerged   Code = "pr-closed-unmerged"  // the thread's PR closed without merging
 	ForcePreconditions Code = "force-preconditions" // --force implied, preconditions unmet
 
-	// ToolUnavailable is the cause §11 implies but does not name: the plan needs
-	// a tool this host does not have, or a gh that cannot answer. A missing
-	// environment is not this one — that is exit 6 before the run starts (§6.4).
+	// ToolUnavailable is a plan-stage need this host cannot meet — a gh that
+	// cannot answer — and §11 does not name it; the coverage test maps causes to
+	// codes, so it cannot see a code without a cause. A missing environment is
+	// not this one: that is exit 6 before the run starts (§6.4).
 	ToolUnavailable Code = "tool-unavailable"
 	// SandboxUnavailable is a container sandbox asked for on a host that cannot
 	// build one. It is a refusal, never a silent downgrade (PRD §6.2).

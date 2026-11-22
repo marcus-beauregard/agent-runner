@@ -86,10 +86,6 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.GateUnavailable},
 		},
 		{
-			cause: "the gate needs a host outside the network allowlist to pass",
-			codes: []refuse.Code{refuse.HostNotAllowed},
-		},
-		{
 			cause: "the diff would touch a path outside the write scope",
 			codes: []refuse.Code{refuse.OutsideWriteScope},
 		},
