@@ -140,6 +140,15 @@ func TestRunReadsWhatTheShellSaid(t *testing.T) {
 			wantExit:        127,
 			wantUnavailable: true,
 		},
+		{
+			// The shell did not finish, so it never gave an answer about the
+			// gate: an OOM kill or an operator's signal must not read as the
+			// patch's failure.
+			name:            "a shell killed from outside",
+			command:         "kill -9 $$",
+			wantExit:        -1,
+			wantUnavailable: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
