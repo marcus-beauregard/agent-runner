@@ -807,11 +807,33 @@ func TestWorkSandboxFlag(t *testing.T) {
 	}
 }
 
-// ghClosedIssue and ghClaimedIssue are the two states the plan stage refuses
-// on: the issue is over, or another person already has it.
+// ghClosedIssue, ghClaimedIssue and ghFixedIssue are the states the plan stage
+// refuses on: the issue is over, another person already has it, or a pull
+// request already closed it. The fixed fixture answers two questions, because
+// the plan asks gh twice there — the issue names the link, the pull request
+// says how it ended — and a stub with one answer would feed the issue's JSON
+// to the second call.
 const (
 	ghClosedIssue  = `{"number":27,"title":"Record","state":"CLOSED","assignees":[]}`
 	ghClaimedIssue = `{"number":27,"title":"Record","state":"OPEN","assignees":[{"login":"someone-else"}]}`
+	ghFixedIssue   = `#!/bin/sh
+case "$1 $2" in
+"issue view") printf '%s\n' '{"number":27,"title":"Record","state":"OPEN","assignees":[],"closedByPullRequestsReferences":[{"number":41,"url":"https://example.test/pull/41"}]}' ;;
+"pr view") printf '%s\n' '{"number":41,"state":"MERGED","url":"https://example.test/pull/41"}' ;;
+*) printf 'unexpected gh call: %s %s\n' "$1" "$2" >&2; exit 1 ;;
+esac
+exit 0
+`
+	// ghOpenLinkedPR names the same link but the pull request is still open:
+	// work in flight, which the plan stage must not read as already fixed.
+	ghOpenLinkedPR = `#!/bin/sh
+case "$1 $2" in
+"issue view") printf '%s\n' '{"number":27,"title":"Record","state":"OPEN","assignees":[],"closedByPullRequestsReferences":[{"number":41,"url":"https://example.test/pull/41"}]}' ;;
+"pr view") printf '%s\n' '{"number":41,"state":"OPEN","url":"https://example.test/pull/41"}' ;;
+*) printf 'unexpected gh call: %s %s\n' "$1" "$2" >&2; exit 1 ;;
+esac
+exit 0
+`
 )
 
 // refusalCase is one cause the plan stage can raise, fed through the command:
@@ -847,6 +869,13 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 			evidence: map[string]string{"assignees": "someone-else"},
 		},
 		{
+			name:     "already fixed",
+			path:     map[string]string{"gh": ghFixedIssue},
+			code:     "already-fixed",
+			reason:   "issue was already fixed by merged PR #41",
+			evidence: map[string]string{"pull_request": "https://example.test/pull/41", "state": "MERGED"},
+		},
+		{
 			name:     "tool unavailable",
 			path:     map[string]string{},
 			code:     "tool-unavailable",
@@ -872,6 +901,26 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 			}
 			checkRefusal(t, dir, rec, tc)
 		})
+	}
+}
+
+// TestWorkProceedsPastAnUnmergedLinkedPR: a pull request that names the issue
+// but has not merged is work in flight, not a fix. The plan stage asks the pull
+// request its state and goes on; refusing there would make every issue with a
+// PR in review unattendable, the opposite of what the cause is for.
+func TestWorkProceedsPastAnUnmergedLinkedPR(t *testing.T) {
+	base := t.TempDir()
+	stubPATH(t, map[string]string{"gh": ghOpenLinkedPR})
+	ref := "https://example.test/issues/27"
+	if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := onlyRun(t, base)
+	if rec.Refusal != nil {
+		t.Errorf("refusal = %+v, want none", rec.Refusal)
+	}
+	if rec.State != "done" {
+		t.Errorf("state = %q, want done", rec.State)
 	}
 }
 

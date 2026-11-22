@@ -72,9 +72,10 @@ func (p Plan) String() string {
 
 // Work runs the M0 dry-run: read the issue with gh if it can, then produce a
 // plan. It writes nothing and creates no branch. A refusal — gh unavailable,
-// an unreadable issue, or one that is closed or already claimed — is returned
-// as a typed *refuse.Refusal, alongside the best plan we can still print, so
-// the caller can record why the run stopped instead of only that it did.
+// an unreadable issue, or one that is closed, already fixed by a merged pull
+// request, or already claimed — is returned as a typed *refuse.Refusal,
+// alongside the best plan we can still print, so the caller can record why the
+// run stopped instead of only that it did.
 func Work(ctx context.Context, ref, repo, gate string) (Plan, error) {
 	plan := Plan{Ref: ref, Gate: gate}
 	gh, err := exec.LookPath("gh")
@@ -84,7 +85,7 @@ func Work(ctx context.Context, ref, repo, gate string) (Plan, error) {
 		refusal.Evidence = map[string]string{"error": err.Error()}
 		return plan, refusal
 	}
-	issue, err := fetchIssue(ctx, gh, ref)
+	issue, merged, err := fetchIssue(ctx, gh, ref)
 	if err != nil {
 		plan.Scope = "(issue could not be read)"
 		refusal := refuse.New(refuse.ToolUnavailable, "plan", "the issue could not be read")
@@ -105,38 +106,103 @@ func Work(ctx context.Context, ref, repo, gate string) (Plan, error) {
 		refusal.Evidence = map[string]string{"assignees": strings.Join(issue.Assignees, ", ")}
 		return plan, refusal
 	}
+	if merged != nil {
+		refusal := refuse.New(refuse.AlreadyFixed, "plan",
+			fmt.Sprintf("issue was already fixed by merged PR #%d", merged.Number))
+		refusal.Evidence = map[string]string{"pull_request": merged.URL, "state": "MERGED"}
+		return plan, refusal
+	}
 	return plan, nil
+}
+
+// pullRequest is a pull request GitHub links to an issue, once it has merged.
+// The issue's own list names the link, not the outcome, so the state is read
+// from the pull request: an open one is work in flight, not a fix.
+type pullRequest struct {
+	Number int
+	URL    string
 }
 
 type ghAssignee struct {
 	Login string `json:"login"`
 }
 
+// ghPRRef is one entry of the issue's closedByPullRequestsReferences: a pull
+// request that names the issue and would close it, whatever its state.
+type ghPRRef struct {
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+}
+
 // fetchIssue reads issue metadata through the gh CLI as an argv array — never
-// a shell — and returns only the fields the worker needs to decide.
-func fetchIssue(ctx context.Context, gh, ref string) (Issue, error) {
+// a shell — and returns only the fields the worker needs to decide, plus the
+// first linked pull request that has merged, if any.
+func fetchIssue(ctx context.Context, gh, ref string) (Issue, *pullRequest, error) {
 	out, err := exec.CommandContext(ctx, gh, "issue", "view", ref,
-		"--json", "number,title,state,assignees").Output()
+		"--json", "number,title,state,assignees,closedByPullRequestsReferences").Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			return Issue{}, fmt.Errorf("gh issue view: %s", strings.TrimSpace(string(ee.Stderr)))
+			return Issue{}, nil, fmt.Errorf("gh issue view: %s", strings.TrimSpace(string(ee.Stderr)))
 		}
-		return Issue{}, err
+		return Issue{}, nil, err
 	}
 	var raw struct {
 		Number    int          `json:"number"`
 		Title     string       `json:"title"`
 		State     string       `json:"state"`
 		Assignees []ghAssignee `json:"assignees"`
+		ClosedBy  []ghPRRef    `json:"closedByPullRequestsReferences"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return Issue{}, fmt.Errorf("parse gh output: %w", err)
+		return Issue{}, nil, fmt.Errorf("parse gh output: %w", err)
 	}
 	assignees := make([]string, 0, len(raw.Assignees))
 	for _, a := range raw.Assignees {
 		assignees = append(assignees, a.Login)
 	}
-	return Issue{Title: raw.Title, State: raw.State, Assignees: assignees}, nil
+	merged, err := mergedOf(ctx, gh, raw.ClosedBy)
+	if err != nil {
+		return Issue{}, nil, err
+	}
+	return Issue{Title: raw.Title, State: raw.State, Assignees: assignees}, merged, nil
+}
+
+// mergedOf returns the first linked pull request that has already merged. Each
+// link is read on its own because the issue's list does not say how it ended,
+// and "already fixed" is a claim about the outcome. A link that cannot be read
+// is an error rather than a maybe: the run would otherwise proceed on a guess
+// about whether the work is already done.
+func mergedOf(ctx context.Context, gh string, refs []ghPRRef) (*pullRequest, error) {
+	for _, link := range refs {
+		out, err := exec.CommandContext(ctx, gh, "pr", "view", link.URL,
+			"--json", "number,state,url").Output()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return nil, fmt.Errorf("gh pr view: %s", strings.TrimSpace(string(ee.Stderr)))
+			}
+			return nil, err
+		}
+		var pr struct {
+			Number int    `json:"number"`
+			State  string `json:"state"`
+			URL    string `json:"url"`
+		}
+		if err := json.Unmarshal(out, &pr); err != nil {
+			return nil, fmt.Errorf("parse gh output: %w", err)
+		}
+		if !strings.EqualFold(pr.State, "MERGED") {
+			continue
+		}
+		number, url := pr.Number, pr.URL
+		if number == 0 {
+			number = link.Number
+		}
+		if url == "" {
+			url = link.URL
+		}
+		return &pullRequest{Number: number, URL: url}, nil
+	}
+	return nil, nil
 }
 
 func orUnknown(s string) string {
