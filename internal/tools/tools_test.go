@@ -281,6 +281,52 @@ func TestWriteFileNamesTheEscape(t *testing.T) {
 	}
 }
 
+// TestAbsolutePathIsJudgedAfterResolution pins the two ways an absolute name
+// can lie about where it points. Spelling the path against the root gets both
+// of these backwards, so checkPath resolves it like any other.
+func TestAbsolutePathIsJudgedAfterResolution(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	outside := filepath.Join(dir, "outside")
+	for _, d := range []string{work, outside} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An absolute name that looks like it is under work but follows a symlink
+	// to the outside: a real escape, so it must be a refusal.
+	if err := os.Symlink(outside, filepath.Join(work, "lnk")); err != nil {
+		t.Fatal(err)
+	}
+	// An absolute name outside work that follows a symlink back in: it stays
+	// inside, so it is a naming mistake and must not be a refusal.
+	if err := os.Symlink(work, filepath.Join(dir, "rootlink")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = r.Run(context.Background(), "write_file", map[string]any{
+		"path": filepath.Join(work, "lnk", "evil.txt"), "content": "x",
+	})
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		t.Fatalf("absolute name through a symlink to the outside = %v, want a refusal", err)
+	}
+
+	_, err = r.Run(context.Background(), "write_file", map[string]any{
+		"path": filepath.Join(dir, "rootlink", "ok.txt"), "content": "x",
+	})
+	if err == nil {
+		t.Fatal("absolute name = nil, want it refused as a name")
+	}
+	if errors.As(err, &ref) {
+		t.Errorf("absolute name that resolves inside = refusal %v, want a plain tool error", ref)
+	}
+}
+
 func TestReadFileRefusesSymlinkEscape(t *testing.T) {
 	dir := t.TempDir()
 	work := filepath.Join(dir, "work")

@@ -344,13 +344,12 @@ func (r *Registry) escapes(arg, resolved, root string) error {
 // file is reopened by name after the check and a swapped symlink would still
 // win the race.
 func (r *Registry) checkPath(arg string) error {
-	if strings.HasPrefix(arg, "/") {
-		if clean := filepath.Clean(arg); clean == r.root || strings.HasPrefix(clean, r.root+string(filepath.Separator)) {
-			return fmt.Errorf("name the path from the working directory, not absolutely: %s", arg)
-		}
-		return fmt.Errorf("%w: %s", errOutsideRoot, arg)
+	absolute := strings.HasPrefix(arg, "/")
+	probe := filepath.Join(r.root, arg)
+	if absolute {
+		probe = arg
 	}
-	if hasDotDot(arg) {
+	if !absolute && hasDotDot(arg) {
 		// A ".." that climbs out of the root is an escape; one that comes back
 		// in ("a/../b.txt") is a sloppy name and nothing has left the scope.
 		if joined := filepath.Join(r.root, arg); joined != r.root && !strings.HasPrefix(joined, r.root+string(filepath.Separator)) {
@@ -358,19 +357,39 @@ func (r *Registry) checkPath(arg string) error {
 		}
 		return fmt.Errorf("path must not contain \"..\": %s", arg)
 	}
-	probe := filepath.Join(r.root, arg)
+	resolved, err := resolvePath(probe, arg)
+	if err != nil {
+		return err
+	}
+	if err := r.escapes(arg, resolved, r.root); err != nil {
+		return err
+	}
+	if absolute {
+		// The path is inside after resolution, so nothing left the scope; the
+		// name is just not one this tool takes. Spelling alone cannot decide
+		// that: a symlinked ancestor can make an absolute name point either way.
+		return fmt.Errorf("name the path from the working directory, not absolutely: %s", arg)
+	}
+	return nil
+}
+
+// resolvePath follows symlinks at the deepest ancestor of probe that exists and
+// reattaches the part that does not, so a symlink cannot smuggle a path out of
+// the root by pointing at a name the walk never reaches. arg is only used in
+// the errors.
+func resolvePath(probe, arg string) (string, error) {
 	missing := make([]string, 0)
 	for {
 		real, err := filepath.EvalSymlinks(probe)
 		if err == nil {
-			return r.escapes(arg, filepath.Join(append([]string{real}, missing...)...), r.root)
+			return filepath.Join(append([]string{real}, missing...)...), nil
 		}
 		if !isNotFound(err) {
-			return err
+			return "", err
 		}
 		parent := filepath.Dir(probe)
 		if parent == probe {
-			return fmt.Errorf("path cannot be resolved: %s", arg)
+			return "", fmt.Errorf("path cannot be resolved: %s", arg)
 		}
 		missing = append([]string{filepath.Base(probe)}, missing...)
 		probe = parent
