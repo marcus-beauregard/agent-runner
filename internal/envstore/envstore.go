@@ -8,10 +8,11 @@
 // one directory (PRD §6.3), and it keeps the store buildable while the code
 // that computes the digest is still in review.
 //
-// The directory is the environment. It is created once, with a manifest that
-// says whether it is finished, so a crash during init leaves evidence a later
-// env-check reads as "not ready" rather than a toolchain missing the one
-// program a gate needs.
+// The directory is the environment, and it only gets its name when it is
+// finished: a build writes into a temporary sibling and MarkReady renames it to
+// <digest>, as the run record does. A crash during init therefore leaves a
+// sibling gc can collect, and never a directory that env-check could mistake
+// for a provisioned one (PRD §6.4).
 package envstore
 
 import (
@@ -59,6 +60,11 @@ type Env struct {
 
 	// Manifest is the manifest last read or written.
 	Manifest Manifest
+
+	// final is the published name of the environment. While a build runs Dir is
+	// a temporary sibling and final is where MarkReady will put it; once the
+	// rename has happened the two are the same path.
+	final string
 }
 
 // Root returns <base>/agent-runner/envs, where every environment lives, beside
@@ -91,28 +97,35 @@ func Dir(base, digest string) (string, error) {
 	return filepath.Join(root, digest), nil
 }
 
-// Create makes the environment directory for m.Digest with its bin, lib, share
-// and tmp subdirectories, and writes env.json with state building. A digest
-// that already exists fails rather than being reused: two processes building
-// the same digest must not write over each other, and a caller that wants the
-// existing one opens it.
+// Create starts an environment for m.Digest: bin, lib, share and tmp inside a
+// temporary sibling of the published directory, and env.json saying building.
+// A digest that is already published fails rather than being reused: two
+// processes building the same digest must not write over each other, and a
+// caller that wants the existing one opens it.
 //
-// The directory is created in place, not under a temporary name, because a
-// build that stops has to leave something a later env-check can name. MarkReady
-// is what turns it into an environment.
+// The build happens under <digest>.tmp-<rand> and MarkReady renames it, so the
+// directory only answers to the digest once it is complete; a build that stops
+// leaves a sibling a later gc collects, not an environment.
 func Create(base string, m Manifest) (*Env, error) {
-	dir, err := Dir(base, m.Digest)
+	final, err := Dir(base, m.Digest)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
 		return nil, fmt.Errorf("create environment store: %w", err)
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("environment %s already exists: %w", m.Digest, err)
-		}
+	if _, err := os.Stat(final); err == nil {
+		return nil, fmt.Errorf("environment %s already exists: %w", m.Digest, os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat environment %s: %w", m.Digest, err)
+	}
+	dir, err := os.MkdirTemp(filepath.Dir(final), m.Digest+".tmp-")
+	if err != nil {
 		return nil, fmt.Errorf("create environment directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("set permissions on %s: %w", dir, err)
 	}
 	for _, sub := range []string{"bin", "lib", "share", "tmp"} {
 		if err := os.Mkdir(filepath.Join(dir, sub), 0o700); err != nil {
@@ -129,7 +142,7 @@ func Create(base string, m Manifest) (*Env, error) {
 	if m.Tools == nil {
 		m.Tools = []Tool{}
 	}
-	e := &Env{Dir: dir, Manifest: m}
+	e := &Env{Dir: dir, final: final, Manifest: m}
 	if err := e.write(); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
@@ -147,17 +160,43 @@ func Open(base, digest string) (*Env, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Env{Dir: dir, Manifest: m}, nil
+	return &Env{Dir: dir, final: dir, Manifest: m}, nil
 }
 
 // MarkReady records that the build finished, with the number of bytes the
-// environment holds. It is the store's only transition: a manifest that is
-// already ready stays ready, so finishing a resumed build costs one write
-// rather than a second install.
+// environment holds, and publishes the directory under its digest. It is the
+// store's only transition: a manifest that is already ready stays ready, so
+// finishing a resumed build costs one write rather than a second install, and
+// a second MarkReady on a published environment writes without renaming.
 func (e *Env) MarkReady(bytes int64) error {
 	e.Manifest.State = StateReady
 	e.Manifest.Bytes = bytes
-	return e.write()
+	if e.Dir == e.final {
+		return e.write()
+	}
+	if err := e.write(); err != nil {
+		return err
+	}
+	if _, err := os.Stat(e.final); err == nil {
+		return fmt.Errorf("environment %s already exists: %w", e.Manifest.Digest, os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat environment %s: %w", e.Manifest.Digest, err)
+	}
+	if err := os.Rename(e.Dir, e.final); err != nil {
+		return fmt.Errorf("publish environment: %w", err)
+	}
+	e.Dir = e.final
+	// The rename has to survive a crash too, so the store root is synced after
+	// it, the same way write syncs the directory it publishes into.
+	d, err := os.Open(filepath.Dir(e.final))
+	if err != nil {
+		return fmt.Errorf("open environment store: %w", err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("sync environment store: %w", err)
+	}
+	return nil
 }
 
 // write publishes env.json with a rename, so a reader never sees half a

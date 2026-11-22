@@ -2,6 +2,7 @@ package envstore
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,8 +25,13 @@ func TestCreateLaysOutAnEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if want := filepath.Join(base, "agent-runner", "envs", digest); e.Dir != want {
-		t.Errorf("Dir = %q, want %q", e.Dir, want)
+	final := filepath.Join(base, "agent-runner", "envs", digest)
+	// The build runs in a sibling of the published name, never at it.
+	if e.Dir == final {
+		t.Fatalf("Create wrote the environment at its published name %q", e.Dir)
+	}
+	if base := filepath.Base(e.Dir); !strings.HasPrefix(base, digest+".tmp-") || filepath.Dir(e.Dir) != filepath.Dir(final) {
+		t.Errorf("build directory = %q, want %s.tmp-* beside %q", e.Dir, digest, final)
 	}
 	for _, sub := range []string{"bin", "lib", "share", "tmp"} {
 		fi, err := os.Stat(filepath.Join(e.Dir, sub))
@@ -44,13 +50,25 @@ func TestCreateLaysOutAnEnvironment(t *testing.T) {
 		t.Error("CreatedAt is empty: the manifest should say when the build started")
 	}
 
+	// Nothing is published yet, so a reader gets nothing: Open must never answer
+	// for a tree that is still being built.
+	if _, err := Open(base, digest); err == nil {
+		t.Fatal("Open succeeded while the build was still running")
+	}
+	if err := e.MarkReady(2048); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+	if e.Dir != final {
+		t.Errorf("Dir after MarkReady = %q, want %q", e.Dir, final)
+	}
+
 	// The file is the contract with a later reader, so read it back rather than
 	// trusting the struct in memory.
 	m, err := Open(base, digest)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if m.Manifest.Digest != digest || m.Manifest.State != StateBuilding {
+	if m.Manifest.Digest != digest || m.Manifest.State != StateReady || m.Manifest.Bytes != 2048 {
 		t.Errorf("reopened manifest = %+v", m.Manifest)
 	}
 	if len(m.Manifest.Tools) != 1 || m.Manifest.Tools[0].Source != "go.mod#toolchain" {
@@ -63,11 +81,41 @@ func TestCreateLaysOutAnEnvironment(t *testing.T) {
 
 func TestCreateRefusesAnExistingDigest(t *testing.T) {
 	base := t.TempDir()
-	if _, err := Create(base, Manifest{Digest: digest}); err != nil {
+	first, err := Create(base, Manifest{Digest: digest})
+	if err != nil {
 		t.Fatalf("first Create: %v", err)
+	}
+	if err := first.MarkReady(1); err != nil {
+		t.Fatalf("MarkReady: %v", err)
 	}
 	if _, err := Create(base, Manifest{Digest: digest}); err == nil {
 		t.Fatal("second Create succeeded; a digest that exists must not be reused")
+	}
+}
+
+// A build that stops leaves the temporary sibling and nothing at the digest,
+// which is what lets gc collect it and env-check call the digest absent.
+func TestStoppedBuildLeavesOnlyASibling(t *testing.T) {
+	base := t.TempDir()
+	if _, err := Create(base, Manifest{Digest: digest}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	final := filepath.Join(base, "agent-runner", "envs", digest)
+	if _, err := os.Stat(final); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat %s: %v, want not exist", final, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(final))
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	var siblings []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), digest+".tmp-") {
+			siblings = append(siblings, entry.Name())
+		}
+	}
+	if len(siblings) != 1 {
+		t.Fatalf("store holds %v, want exactly one %s.tmp-* sibling", siblings, digest)
 	}
 }
 
@@ -117,6 +165,9 @@ func TestMarkReady(t *testing.T) {
 	if m.Manifest.CreatedAt != created {
 		t.Errorf("CreatedAt = %q after a repeat, want %q", m.Manifest.CreatedAt, created)
 	}
+	if m.Dir != filepath.Join(base, "agent-runner", "envs", digest) {
+		t.Errorf("Dir = %q after a repeat, want the published name", m.Dir)
+	}
 }
 
 func TestOpenMissing(t *testing.T) {
@@ -142,6 +193,16 @@ func TestCreateLeavesNoTemporaryManifest(t *testing.T) {
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".env.json-") {
 			t.Errorf("temporary manifest left behind: %s", entry.Name())
+		}
+	}
+	// The published environment is the only thing left in the store.
+	root, err := os.ReadDir(filepath.Dir(e.Dir))
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	for _, entry := range root {
+		if strings.HasPrefix(entry.Name(), digest+".tmp-") {
+			t.Errorf("build directory left behind: %s", entry.Name())
 		}
 	}
 }
