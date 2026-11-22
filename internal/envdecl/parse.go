@@ -114,16 +114,26 @@ func parsePyproject(content string, d *Decl) error {
 // parseDockerfile reads every FROM line. Each image becomes an entry named
 // after the image with the tag as version, so "FROM node:18" and an engines
 // rule of ">=20" sit side by side as the conflict they are. A tagless image
-// is "latest"; stage names (AS builder) are ignored.
+// is "latest"; stage names (AS builder) are ignored. The directive must be
+// the whole word FROM (a line like "FROMAGE ..." is not one), and leading
+// --flags (e.g. "FROM --platform=linux/amd64 node:18") are skipped so the
+// image is the first non-flag argument.
 func parseDockerfile(content string, d *Decl) error {
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
-		if len(line) >= 4 && strings.EqualFold(line[:4], "from") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
+		if len(line) > 4 && strings.EqualFold(line[:4], "from") && (line[4] == ' ' || line[4] == '\t') {
+			fields := strings.Fields(line)[1:]
+			image := ""
+			for _, f := range fields {
+				if strings.HasPrefix(f, "--") {
+					continue // --platform=..., --pull=... etc.
+				}
+				image = f
+				break
+			}
+			if image == "" {
 				return fmt.Errorf("FROM without an image: %q", line)
 			}
-			image := fields[1]
 			// A tag is a ':' after the last '/', so a registry port
 			// ("registry:5000/img") is not mistaken for one.
 			name, version := image, "latest"

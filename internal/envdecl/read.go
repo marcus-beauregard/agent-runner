@@ -1,68 +1,40 @@
 package envdecl
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"sort"
 	"strings"
 )
 
-// lockfiles are the dependency-pinning files recognised at a repo root. Their
-// presence is itself a declaration: a repo with go.sum pins its Go modules,
-// and env-init can say why it wants the module cache warm.
-var lockfiles = []string{
-	"go.sum",
-	"package-lock.json",
-	"npm-shrinkwrap.json",
-	"yarn.lock",
-	"pnpm-lock.yaml",
-	"bun.lockb",
-	"Cargo.lock",
-	"uv.lock",
-	"poetry.lock",
-	"Pipfile.lock",
-	"requirements.txt",
-	"composer.lock",
-	"Gemfile.lock",
-}
-
-// Read parses the declarations of the repository at repo and returns them as
-// a Decl. It reads files only: no network, no execution, no guessing at what
-// a file might have meant.
+// Read parses the declarations read from fsys (paths relative to its root) and
+// returns them as a Decl. It reads files only: no network, no execution, no
+// guessing at what a file might have meant.
 //
-// A repo that declares nothing yields an empty Decl and no error. A repo
-// path that is not a directory, or a declaring file that cannot be read or
-// parsed, is an error — a silent skip would make the digest lie about what
-// was read.
-func Read(repo string) (Decl, error) {
-	info, err := os.Stat(repo)
-	if err != nil {
-		return Decl{}, fmt.Errorf("envdecl: read repo: %w", err)
-	}
-	if !info.IsDir() {
-		return Decl{}, fmt.Errorf("envdecl: read repo: %s is not a directory", repo)
-	}
-
+// Taking an fs.FS keeps this package pure and puts the ref where it belongs:
+// the caller materialises the declaration at a ref — `git show <ref>:go.mod`
+// into an fstest.MapFS, or os.DirFS of a worktree checked out at that ref —
+// and the digest then answers for that ref, not for whatever a directory
+// happens to hold (PRD §6.4: "the declaration is what a ref says").
+//
+// A repo that declares nothing yields an empty Decl and no error. A declaring
+// file that cannot be read or parsed is an error — a silent skip would make
+// the digest lie about what was read.
+func Read(fsys fs.FS) (Decl, error) {
 	var d Decl
-	d.files = map[string]string{}
 
 	// Each reader parses one file and appends what it declares. A file that
-	// does not exist contributes nothing; one that exists is read and hashed
-	// even if it declares nothing, so the digest sees it.
+	// does not exist contributes nothing; one that exists is parsed even if
+	// it declares nothing, so the digest sees its name in Source.
 	read := func(name string, parse func(content string) error) error {
-		path := filepath.Join(repo, name)
-		b, err := os.ReadFile(path)
+		b, err := fs.ReadFile(fsys, name)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
 			return fmt.Errorf("envdecl: read %s: %w", name, err)
 		}
-		sum := sha256.Sum256(b)
-		d.files[name] = hex.EncodeToString(sum[:])
 		d.Source = append(d.Source, name)
 		if err := parse(string(b)); err != nil {
 			return fmt.Errorf("envdecl: parse %s: %w", name, err)
@@ -95,23 +67,10 @@ func Read(repo string) (Decl, error) {
 		return Decl{}, err
 	}
 
-	// Lockfiles are declarations of presence, not content: the file's bytes
-	// are hashed in d.files when it is read, so a dependency bump moves the
-	// digest even though only the name is listed here.
-	for _, name := range lockfiles {
-		path := filepath.Join(repo, name)
-		b, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return Decl{}, fmt.Errorf("envdecl: read %s: %w", name, err)
-		}
-		sum := sha256.Sum256(b)
-		d.files[name] = hex.EncodeToString(sum[:])
-		d.Source = append(d.Source, name)
-		d.Packages = append(d.Packages, name)
-	}
+	// Lockfiles declare nothing here: dependencies are the run's, not the
+	// environment's (PRD §6.4), so go.sum / package-lock.json & co. neither
+	// enter the Decl nor move the digest. The deps stage reads the tree and
+	// the lockfile chooses the resolver command; it never the digest.
 
 	d.sort()
 	return d, nil

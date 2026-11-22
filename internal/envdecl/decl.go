@@ -3,12 +3,15 @@
 // hash of that answer" without executing or reaching the network.
 //
 // The declarations are the files a repo already carries: go.mod, package.json,
-// rust-toolchain.toml, .python-version / pyproject.toml, a Dockerfile, the
-// lockfiles that pin dependencies, and an optional agent-runner.env.toml for
-// what those files cannot say (services, extra tools). Read parses them into a
-// Decl; Digest hashes the Decl plus the bytes of every file that declared
-// something, so an edit changes the digest only when it changes bytes that
-// matter.
+// rust-toolchain.toml, .python-version / pyproject.toml, a Dockerfile, and an
+// optional agent-runner.env.toml for what those files cannot say (extra tools,
+// packages, services). Read parses them into a Decl from an fs.FS, so the
+// caller decides which ref the files come from (`git show <ref>:go.mod` into a
+// map FS, or os.DirFS of a checkout); Digest hashes the normalised Decl only —
+// never the bytes of the files that declared it, so a comment, a reordered
+// field or a reformat is not a different environment. Lockfiles deliberately
+// declare nothing here: dependencies are the run's, not the environment's,
+// and the deps stage answers for them from the tree.
 package envdecl
 
 // Tool is one toolchain entry: a name, the version or version spec the repo
@@ -30,12 +33,7 @@ type Tool struct {
 // from.
 type Decl struct {
 	Toolchain []Tool
-	Packages  []string // lockfiles that pin the dependency set, e.g. "go.sum"
+	Packages  []string // packages the declaration names itself, e.g. "postgresql-client"
 	Services  []string // services expected beside the repo, e.g. "postgres (postgres:16)"
 	Source    []string // every declaring file Read parsed, sorted
-
-	// files maps each declaring file to the SHA-256 of its bytes, so Digest
-	// covers the content, not just what was parsed out of it. It is set by
-	// Read; a Decl built by hand hashes its declaration only.
-	files map[string]string
 }

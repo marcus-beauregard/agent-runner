@@ -8,16 +8,18 @@ import (
 	"sort"
 )
 
-// Digest returns the hex SHA-256 over the normalised declaration plus the
-// content of every declaring file.
+// Digest returns the hex SHA-256 over the normalised declaration — and over
+// nothing else. PRD §6.4: the digest "is a hash over that normalised form and
+// never over the bytes that declared it — a comment, a reordered field, a
+// reformat is not a different environment." So the file contents Read saw are
+// deliberately not hashed; a version bump moves the digest because it changes
+// a parsed entry, not because bytes changed.
 //
 // The hashed value is built, not borrowed, for the same reason as
 // world.Digest: a struct names the fields in a fixed order, every slice is
 // sorted first, and no map is marshalled — Go randomises map iteration, and a
 // digest that changes from run to run is worse than none. The same tree read
-// twice therefore produces the same digest byte for byte, and a version bump
-// in any declaring file changes it twice over: once in the parsed entry, once
-// in the file's content hash.
+// twice therefore produces the same digest byte for byte.
 func Digest(d Decl) (string, error) {
 	b, err := json.Marshal(d.canonical())
 	if err != nil {
@@ -36,18 +38,12 @@ type canonicalDecl struct {
 	Packages  []string        `json:"packages"`
 	Services  []string        `json:"services"`
 	Source    []string        `json:"source"`
-	Files     []canonicalFile `json:"files"`
 }
 
 type canonicalTool struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	Source  string `json:"source"`
-}
-
-type canonicalFile struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
 }
 
 // canonical builds the digestable value: every slice sorted and non-nil, so
@@ -59,7 +55,6 @@ func (d Decl) canonical() canonicalDecl {
 		Packages:  nonNil(d.Packages),
 		Services:  nonNil(d.Services),
 		Source:    nonNil(d.Source),
-		Files:     make([]canonicalFile, 0, len(d.files)),
 	}
 	for _, t := range d.Toolchain {
 		c.Toolchain = append(c.Toolchain, canonicalTool{Name: t.Name, Version: t.Version, Source: t.Source})
@@ -77,10 +72,6 @@ func (d Decl) canonical() canonicalDecl {
 	sort.Strings(c.Packages)
 	sort.Strings(c.Services)
 	sort.Strings(c.Source)
-	for path, sum := range d.files {
-		c.Files = append(c.Files, canonicalFile{Path: path, SHA256: sum})
-	}
-	sort.Slice(c.Files, func(i, j int) bool { return c.Files[i].Path < c.Files[j].Path })
 	return c
 }
 

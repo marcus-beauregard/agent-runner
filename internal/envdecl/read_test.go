@@ -1,28 +1,24 @@
 package envdecl
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
+	"testing/fstest"
 )
 
-// writeRepo materialises files (name -> content) in a temp dir and returns
-// its path. A nil content list makes an empty repo.
-func writeRepo(t *testing.T, files map[string]string) string {
-	t.Helper()
-	dir := t.TempDir()
+// mapFS builds an fs.FS from files (name -> content). A nil map makes an
+// empty repo. Read takes an fs.FS, so tests run on fstest.MapFS and the git
+// side (`git show <ref>:<file>`) stays in the command that calls this.
+func mapFS(files map[string]string) fs.FS {
+	m := fstest.MapFS{}
 	for name, content := range files {
-		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		m[name] = &fstest.MapFile{Data: []byte(content)}
 	}
-	return dir
+	return m
 }
 
 // normalise replaces nil slices with empty ones, so a Decl read from a repo
@@ -90,7 +86,9 @@ func TestReadProducesExpectedDecl(t *testing.T) {
 			},
 		},
 		{
-			name: "lockfile presence lands in Packages",
+			// PRD §6.4: dependencies are the run's, not the environment's —
+			// lockfiles neither enter the Decl nor move the digest.
+			name: "lockfiles declare nothing (go.sum / package-lock.json ignored)",
 			files: map[string]string{
 				"package.json":      `{"engines": {"node": ">=20"}}`,
 				"package-lock.json": `{"lockfileVersion": 3}`,
@@ -98,9 +96,9 @@ func TestReadProducesExpectedDecl(t *testing.T) {
 			},
 			want: Decl{
 				Toolchain: []Tool{{Name: "node", Version: ">=20", Source: "package.json#engines.node"}},
-				Packages:  []string{"go.sum", "package-lock.json"},
+				Packages:  []string{},
 				Services:  []string{},
-				Source:    []string{"go.sum", "package-lock.json", "package.json"},
+				Source:    []string{"package.json"},
 			},
 		},
 		{
@@ -155,6 +153,22 @@ func TestReadProducesExpectedDecl(t *testing.T) {
 			},
 		},
 		{
+			name:  "Dockerfile FROM with a --platform flag takes the image, not the flag",
+			files: map[string]string{"Dockerfile": "FROM --platform=linux/amd64 node:18 AS build\n"},
+			want: Decl{
+				Toolchain: []Tool{{Name: "node", Version: "18", Source: "Dockerfile#FROM node:18"}},
+				Packages:  []string{}, Services: []string{}, Source: []string{"Dockerfile"},
+			},
+		},
+		{
+			name:  "a line starting with FROM but not the directive (FROMAGE) is ignored",
+			files: map[string]string{"Dockerfile": "FROMAGE is not a directive\nFROM alpine:3.20\n"},
+			want: Decl{
+				Toolchain: []Tool{{Name: "alpine", Version: "3.20", Source: "Dockerfile#FROM alpine:3.20"}},
+				Packages:  []string{}, Services: []string{}, Source: []string{"Dockerfile"},
+			},
+		},
+		{
 			name: "agent-runner.env.toml tools, packages, services",
 			files: map[string]string{
 				"agent-runner.env.toml": "[[tool]]\nname = \"go\"\nversion = \"1.23\"\n\n[[package]]\nname = \"postgresql-client\"\n\n[[service]]\nname = \"postgres\"\nimage = \"postgres:16\"\n",
@@ -185,24 +199,16 @@ func TestReadProducesExpectedDecl(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := writeRepo(t, tt.files)
-			got, err := Read(dir)
+			got, err := Read(mapFS(tt.files))
 			if err != nil {
 				t.Fatalf("Read: %v", err)
 			}
-			// files is unexported bookkeeping; compare the exported shape,
-			// then check one hash per Source entry separately. nil and empty
-			// slices are the same declaration, so normalise before comparing.
-			gotFiles := got.files
-			got.files = nil
+			// nil and empty slices are the same declaration, so normalise
+			// before comparing.
 			got = normalise(got)
 			want := normalise(tt.want)
-			want.files = nil
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Read mismatch:\n got: %+v\nwant: %+v", got, want)
-			}
-			if len(gotFiles) != len(tt.want.Source) {
-				t.Fatalf("files hashed = %d, want one per Source entry %d", len(gotFiles), len(tt.want.Source))
 			}
 		})
 	}
@@ -212,17 +218,17 @@ func TestReadProducesExpectedDecl(t *testing.T) {
 // the same tree read twice gives the same Decl and the same digest byte for
 // byte.
 func TestReadSameTreeTwiceIsIdentical(t *testing.T) {
-	dir := writeRepo(t, map[string]string{
+	fsys := mapFS(map[string]string{
 		"go.mod":       "module example.com/x\n\ngo 1.22\n",
 		"package.json": `{"engines": {"node": ">=20"}, "packageManager": "pnpm@9.1.0"}`,
 		"Dockerfile":   "FROM node:18 AS build\n",
 		"go.sum":       "h1:abc=\n",
 	})
-	a, err := Read(dir)
+	a, err := Read(fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Read(dir)
+	b, err := Read(fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,8 +251,7 @@ func TestReadSameTreeTwiceIsIdentical(t *testing.T) {
 // TestVersionBumpChangesDigest pins the other half: a version bump in a
 // declaring file changes the digest.
 func TestVersionBumpChangesDigest(t *testing.T) {
-	dir := writeRepo(t, map[string]string{"go.mod": "module example.com/x\n\ngo 1.22\n"})
-	before, err := Read(dir)
+	before, err := Read(mapFS(map[string]string{"go.mod": "module example.com/x\n\ngo 1.22\n"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,10 +260,7 @@ func TestVersionBumpChangesDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/x\n\ngo 1.23\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	after, err := Read(dir)
+	after, err := Read(mapFS(map[string]string{"go.mod": "module example.com/x\n\ngo 1.23\n"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,21 +276,55 @@ func TestVersionBumpChangesDigest(t *testing.T) {
 	}
 }
 
+// TestCosmeticEditsLeaveDigestAlone is the PRD §6.4 rule pinned: a comment
+// added to go.mod, package.json keys reordered by a formatter, and a lockfile
+// byte change are NOT different environments — the digest must not move.
+func TestCosmeticEditsLeaveDigestAlone(t *testing.T) {
+	base := mapFS(map[string]string{
+		"go.mod":       "module example.com/x\n\ngo 1.22\n",
+		"package.json": `{"engines": {"node": ">=20"}, "packageManager": "npm@10.2.3"}`,
+		"go.sum":       "h1:abc=\n",
+	})
+	cosmetic := mapFS(map[string]string{
+		"go.mod":       "// a comment added later\nmodule example.com/x\n\ngo 1.22\n",
+		"package.json": `{"packageManager": "npm@10.2.3", "engines": {"node": ">=20"}}`,
+		"go.sum":       "h1:def=\n", // dependency bytes moved, declaration did not
+	})
+	dBase, err := Digest(mustRead(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dCosmetic, err := Digest(mustRead(t, cosmetic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dBase != dCosmetic {
+		t.Fatalf("cosmetic edit moved the digest: %s vs %s", dBase, dCosmetic)
+	}
+}
+
+func mustRead(t *testing.T, fsys fs.FS) Decl {
+	t.Helper()
+	d, err := Read(fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 // TestReadErrors pins the refusal cases: a missing repo and a malformed
 // declaring file are errors, not silent empty declarations.
 func TestReadErrors(t *testing.T) {
-	if _, err := Read(filepath.Join(t.TempDir(), "no-such-dir")); err == nil {
-		t.Fatal("Read of a missing repo did not fail")
-	}
-	dir := writeRepo(t, map[string]string{"package.json": `{"engines": {`})
-	if _, err := Read(dir); err == nil {
+	if _, err := Read(mapFS(map[string]string{"package.json": `{"engines": {`})); err == nil {
 		t.Fatal("Read of a malformed package.json did not fail")
 	}
+	// An fs rooted at a file is not a repo: reading go.mod under it fails
+	// with something other than ErrNotExist, so Read must not swallow it.
 	file := filepath.Join(t.TempDir(), "afile")
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Read(file); err == nil {
+	if _, err := Read(os.DirFS(file)); err == nil {
 		t.Fatal("Read of a non-directory did not fail")
 	}
 }

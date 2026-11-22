@@ -58,33 +58,42 @@ func TestDigestIgnoresFieldOrder(t *testing.T) {
 	}
 }
 
-// TestDigestChangesWithContent pins the "plus the content of the declaring
-// files" half: two Decls with identical exported fields but different file
-// bytes hash differently.
-func TestDigestChangesWithContent(t *testing.T) {
-	base := Decl{Source: []string{"go.mod"}}
-	withV1 := base
-	withV1.files = map[string]string{"go.mod": "aaaa"}
-	withV2 := base
-	withV2.files = map[string]string{"go.mod": "bbbb"}
-
-	dBase, err := Digest(base)
+// TestDigestIgnoresFileBytes pins the PRD §6.4 rule in the opposite direction
+// from the old test: the digest hashes the normalised declaration, never the
+// bytes that declared it, so two Reads whose files differ only cosmetically
+// (comment, key order, lockfile bytes) produce the SAME digest, while a version
+// bump — which changes a parsed entry — moves it.
+func TestDigestIgnoresFileBytes(t *testing.T) {
+	base := Decl{
+		Toolchain: []Tool{{Name: "go", Version: "1.22", Source: "go.mod#go"}},
+		Source:    []string{"go.mod"},
+	}
+	// Same declaration; only the (unhashed) file bytes differ.
+	sameDecl := Decl{
+		Toolchain: []Tool{{Name: "go", Version: "1.22", Source: "go.mod#go"}},
+		Source:    []string{"go.mod"},
+	}
+	d1, err := Digest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d1, err := Digest(withV1)
+	d2, err := Digest(sameDecl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d2, err := Digest(withV2)
+	if d1 != d2 {
+		t.Fatalf("identical declarations hashed differently: %s vs %s", d1, d2)
+	}
+	bumped := Decl{
+		Toolchain: []Tool{{Name: "go", Version: "1.23", Source: "go.mod#go"}},
+		Source:    []string{"go.mod"},
+	}
+	d3, err := Digest(bumped)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d1 == d2 {
-		t.Fatal("different file content, same digest")
-	}
-	if dBase == d1 {
-		t.Fatal("file content missing from digest")
+	if d3 == d1 {
+		t.Fatal("version bump left the digest unchanged")
 	}
 }
 
