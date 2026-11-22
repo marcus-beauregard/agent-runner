@@ -25,6 +25,11 @@ func TryLock(base, name string) (*Lock, error) {
 	return nil, errors.New("environment locks are not supported on windows")
 }
 
+// buildLock takes no lock, because this platform has none to take. A build goes
+// unguarded rather than failing to start: gc refuses to run here at all, since
+// every TryLock it makes answers that nothing can be proven unused.
+func buildLock(base, name string) (*Lock, error) { return nil, nil }
+
 // Unlock has nothing to release.
 func (l *Lock) Unlock() error { return nil }
 

@@ -54,6 +54,11 @@ func TryLock(base, name string) (*Lock, error) {
 	return &Lock{f: f, path: path}, nil
 }
 
+// buildLock is TryLock under the name of its one other caller: Create holds it
+// for as long as a build runs, so a collector cannot take a directory it is
+// still writing into.
+func buildLock(base, name string) (*Lock, error) { return TryLock(base, name) }
+
 // Unlock releases the lock and leaves the file: a second reader should not have
 // to recreate it, and the file is removed with the environment it guards.
 func (l *Lock) Unlock() error {

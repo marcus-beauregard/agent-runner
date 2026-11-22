@@ -181,7 +181,7 @@ func TestCollectReportsAnEnvironmentHeldByAReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if e := entryFor(t, entries, digest); e.Collect || e.Reason != "held by a reader" {
+	if e := entryFor(t, entries, digest); e.Collect || e.Reason != "held by a reader or a build" {
 		t.Errorf("held environment = collect %v, %q; want kept as held", e.Collect, e.Reason)
 	}
 	if _, err := Remove(base, entryFor(t, entries, digest)); !errors.Is(err, ErrLocked) {
@@ -189,6 +189,51 @@ func TestCollectReportsAnEnvironmentHeldByAReader(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(base, "agent-runner", "envs", digest)); err != nil {
 		t.Errorf("a held environment was deleted: %v", err)
+	}
+}
+
+// TestCollectKeepsABuildInProgress is the same rule for the tree that is not an
+// environment yet. Create's lock is the only evidence a build is live, and the
+// policy says nothing about it: even an age of zero must not reach it.
+func TestCollectKeepsABuildInProgress(t *testing.T) {
+	base := t.TempDir()
+	e, err := Create(base, Manifest{Digest: digest, CreatedAt: now.Add(-40 * 24 * time.Hour).Format(time.RFC3339)})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if e.Dir == filepath.Join(base, "agent-runner", "envs", digest) {
+		t.Fatalf("Create published the environment at its digest: %q", e.Dir)
+	}
+
+	entries, err := Collect(base, Policy{Age: 0}, now)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	build := entryFor(t, entries, filepath.Base(e.Dir))
+	if build.Collect || !strings.Contains(build.Reason, "held by a reader or a build") {
+		t.Errorf("a build in progress = collect %v, %q; want kept as held", build.Collect, build.Reason)
+	}
+	if _, err := Remove(base, build); !errors.Is(err, ErrLocked) {
+		t.Errorf("Remove on a build in progress = %v, want ErrLocked", err)
+	}
+	if _, err := os.Stat(e.Dir); err != nil {
+		t.Errorf("a build in progress was deleted: %v", err)
+	}
+
+	// Once it publishes, the sibling is gone and only the environment is left
+	// for the age policy to consider.
+	if err := e.MarkReady(0); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+	entries, err = Collect(base, Policy{Age: 30 * 24 * time.Hour}, now)
+	if err != nil {
+		t.Fatalf("Collect after MarkReady: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("%d entries after publish, want 1: %+v", len(entries), entries)
+	}
+	if !entries[0].Collect {
+		t.Errorf("the published environment was kept: %q", entries[0].Reason)
 	}
 }
 

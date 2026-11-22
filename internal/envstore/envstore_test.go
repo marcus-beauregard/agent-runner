@@ -108,14 +108,56 @@ func TestStoppedBuildLeavesOnlyASibling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read store: %v", err)
 	}
+	// The build's own lock file shares the prefix, so the count is of
+	// directories: a lock beside a build is not a second build.
 	var siblings []string
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), digest+".tmp-") {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), digest+".tmp-") {
 			siblings = append(siblings, entry.Name())
 		}
 	}
 	if len(siblings) != 1 {
 		t.Fatalf("store holds %v, want exactly one %s.tmp-* sibling", siblings, digest)
+	}
+}
+
+// TestCreateHoldsTheBuildLock is what makes "a build that stopped" mean
+// stopped: while Create's process is still installing, a collector asking for
+// the same lock is refused, so gc cannot take a directory in use.
+func TestCreateHoldsTheBuildLock(t *testing.T) {
+	base := t.TempDir()
+	e, err := Create(base, Manifest{Digest: digest})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	tmp, name := e.Dir, filepath.Base(e.Dir)
+	if l, err := TryLock(base, name); !errors.Is(err, ErrLocked) {
+		if l != nil {
+			l.Discard()
+		}
+		t.Fatalf("a build in progress left its lock free: %v", err)
+	}
+	if _, err := Remove(base, Entry{Name: name, Dir: tmp}); !errors.Is(err, ErrLocked) {
+		t.Errorf("Remove on a build in progress = %v, want ErrLocked", err)
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("a build in progress was deleted: %v", err)
+	}
+
+	if err := e.MarkReady(1); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+	// Publishing renames the directory, so the lock file guarded a name that
+	// no longer exists and goes with it.
+	if _, err := os.Stat(tmp + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the build's lock file outlived the build: %v", err)
+	}
+	l, err := TryLock(base, name)
+	if err != nil {
+		t.Fatalf("the temporary name is still locked after MarkReady: %v", err)
+	}
+	if err := l.Discard(); err != nil {
+		t.Errorf("discard: %v", err)
 	}
 }
 

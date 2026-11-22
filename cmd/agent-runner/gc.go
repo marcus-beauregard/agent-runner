@@ -36,6 +36,11 @@ type gcReport struct {
 	Kept []envstore.Entry `json:"kept"`
 }
 
+// maxEnvDays is the largest --envs the age multiplication can hold, which is a
+// limit of time.Duration rather than of policy: 106751 days is longer than any
+// store has existed, and anything above it wraps instead of meaning "forever".
+const maxEnvDays = int((1<<63 - 1) / int64(24*time.Hour))
+
 func gcCommand(args []string) int {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		usage(os.Stdout)
@@ -57,6 +62,13 @@ func gcCommand(args []string) int {
 	}
 	if *envDays < 0 || *keep < 0 {
 		fmt.Fprintln(os.Stderr, "agent-runner: gc: --envs and --keep cannot be negative")
+		return 1
+	}
+	// A day count is multiplied into a Duration below, so the flag needs the
+	// bound the multiplication has: past it the product wraps, and a negative
+	// age matches every environment in the store.
+	if *envDays > maxEnvDays {
+		fmt.Fprintf(os.Stderr, "agent-runner: gc: --envs is %d days, more than the %d it can hold\n", *envDays, maxEnvDays)
 		return 1
 	}
 

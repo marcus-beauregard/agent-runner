@@ -65,6 +65,11 @@ type Env struct {
 	// a temporary sibling and final is where MarkReady will put it; once the
 	// rename has happened the two are the same path.
 	final string
+
+	// lock is the build's hold on its temporary name, taken by Create and
+	// dropped by MarkReady: while it is held a collector cannot take the same
+	// lock, which is the only way any state file could say "still building".
+	lock *Lock
 }
 
 // Root returns <base>/agent-runner/envs, where every environment lives, beside
@@ -106,6 +111,11 @@ func Dir(base, digest string) (string, error) {
 // The build happens under <digest>.tmp-<rand> and MarkReady renames it, so the
 // directory only answers to the digest once it is complete; a build that stops
 // leaves a sibling a later gc collects, not an environment.
+//
+// The build holds the sibling's lock for as long as it runs. A manifest saying
+// "building" with a start time cannot tell a build that stopped from one that is
+// still installing — only a holder can — so gc asks the lock, and an interrupted
+// build becomes collectable when the process dies and the age passes, not before.
 func Create(base string, m Manifest) (*Env, error) {
 	final, err := Dir(base, m.Digest)
 	if err != nil {
@@ -127,8 +137,17 @@ func Create(base string, m Manifest) (*Env, error) {
 		os.RemoveAll(dir)
 		return nil, fmt.Errorf("set permissions on %s: %w", dir, err)
 	}
+	// The lock is taken before a single tool is installed, so there is no window
+	// in which gc sees an unguarded directory it could take for garbage.
+	name := filepath.Base(dir)
+	l, err := buildLock(base, name)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("lock %s: %w", name, err)
+	}
 	for _, sub := range []string{"bin", "lib", "share", "tmp"} {
 		if err := os.Mkdir(filepath.Join(dir, sub), 0o700); err != nil {
+			l.Discard()
 			os.RemoveAll(dir)
 			return nil, fmt.Errorf("create %s: %w", sub, err)
 		}
@@ -142,8 +161,9 @@ func Create(base string, m Manifest) (*Env, error) {
 	if m.Tools == nil {
 		m.Tools = []Tool{}
 	}
-	e := &Env{Dir: dir, final: final, Manifest: m}
+	e := &Env{Dir: dir, final: final, Manifest: m, lock: l}
 	if err := e.write(); err != nil {
+		e.releaseBuildLock()
 		os.RemoveAll(dir)
 		return nil, err
 	}
@@ -196,7 +216,20 @@ func (e *Env) MarkReady(bytes int64) error {
 	if err := d.Sync(); err != nil {
 		return fmt.Errorf("sync environment store: %w", err)
 	}
+	// The temporary name is gone, so its lock file has nothing left to guard.
+	e.releaseBuildLock()
 	return nil
+}
+
+// releaseBuildLock drops the build's lock and removes its file. A build that
+// never reaches MarkReady leaves the file behind, which is harmless: the kernel
+// released the flock when the process died, and a listing skips lock files.
+func (e *Env) releaseBuildLock() {
+	if e.lock == nil {
+		return
+	}
+	e.lock.Discard()
+	e.lock = nil
 }
 
 // write publishes env.json with a rename, so a reader never sees half a

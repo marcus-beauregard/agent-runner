@@ -139,7 +139,7 @@ func TestGCCommandLeavesALiveEnvironment(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if !strings.Contains(out, "held by a reader") {
+	if !strings.Contains(out, "held by a reader or a build") {
 		t.Errorf("output does not say why it kept the environment:\n%s", out)
 	}
 	if _, err := os.Stat(dir); err != nil {
@@ -158,7 +158,8 @@ func TestGCCommandLeavesALiveEnvironment(t *testing.T) {
 }
 
 // TestGCCommandRejectsNonsense is the flag surface: a negative age is a typo, not
-// a policy, and a positional argument is not a selector this command has.
+// a policy, a positional argument is not a selector this command has, and an age
+// too large to multiply is refused instead of wrapping into "collect everything".
 func TestGCCommandRejectsNonsense(t *testing.T) {
 	stateDir(t)
 	if _, code := captureStdout(t, func() int { return gcCommand([]string{"--envs", "-1"}) }); code != 1 {
@@ -166,5 +167,16 @@ func TestGCCommandRejectsNonsense(t *testing.T) {
 	}
 	if _, code := captureStdout(t, func() int { return gcCommand([]string{"extra"}) }); code != 1 {
 		t.Errorf("a positional argument = %d, want 1", code)
+	}
+
+	// One day past the bound: the product would wrap negative, and a negative
+	// age is under every age, so every environment would qualify.
+	var code int
+	msg := captureStderr(t, func() { code = gcCommand([]string{"--envs", "106752"}) })
+	if code != 1 {
+		t.Errorf("--envs 106752 = %d, want 1", code)
+	}
+	if !strings.Contains(msg, "more than the") {
+		t.Errorf("the refusal does not say what the bound is: %q", msg)
 	}
 }

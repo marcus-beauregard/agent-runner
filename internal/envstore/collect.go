@@ -111,11 +111,15 @@ func Collect(base string, p Policy, now time.Time) ([]Entry, error) {
 		// The lock is the only thing that can make the answer stale between the
 		// listing and the deletion, so it is asked here as well as in Remove:
 		// a dry run that called a live environment collectable would be a lie.
+		// A build holds the same lock from Create, so this one question answers
+		// for a run reading the tools and for a build still installing them —
+		// the manifest's state cannot, since "building" is also what a build
+		// that died leaves behind.
 		l, err := TryLock(base, entries[i].Name)
 		switch {
 		case errors.Is(err, ErrLocked):
 			entries[i].Collect = false
-			entries[i].Reason = "held by a reader"
+			entries[i].Reason = "held by a reader or a build"
 		case err != nil:
 			return nil, err
 		default:
@@ -129,6 +133,11 @@ func Collect(base string, p Policy, now time.Time) ([]Entry, error) {
 // A directory the store cannot describe — no manifest, a manifest naming another
 // digest, a published name whose build never finished — is kept and says so: gc
 // deletes what it can account for, not what it found.
+//
+// An unpublished sibling is only ever age-collectable: it is a build, and the
+// caller's lock check is what separates the one still running from the one that
+// stopped. Age alone would collect a build that has been installing for longer
+// than the policy allows, which is why it is not the only gate.
 func inspect(root, name string, p Policy, now time.Time) (Entry, error) {
 	e := Entry{Name: name, Dir: filepath.Join(root, name)}
 	if i := strings.Index(name, tmpMark); i > 0 {
