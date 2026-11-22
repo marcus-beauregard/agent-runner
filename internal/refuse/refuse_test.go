@@ -86,6 +86,10 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.DependencyUnavailable},
 		},
 		{
+			cause: "a dependency is published only as a source distribution, so fetching it would mean building it on the host",
+			codes: []refuse.Code{refuse.DependencyUnavailable},
+		},
+		{
 			cause: "the gate runs, but the shell could not run a program it calls — 127 for absent, 126 for not executable — and the record keeps what the shell said",
 			codes: []refuse.Code{refuse.GateUnavailable},
 		},
