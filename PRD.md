@@ -1,6 +1,6 @@
 # PRD: agent-runner as a worker
 
-**Status:** draft 2, 2026-11-20
+**Status:** draft 3, 2026-11-22
 **Owner:** Marcus Beauregard
 **One line:** hand it an issue or a pull request, get back something a maintainer can review, with a run record a stranger can pick up.
 
@@ -21,7 +21,7 @@ The second problem is what happens after the PR exists. A review arrives, or CI 
 3. **An agent.** Something with no hands calls the CLI, reads machine output, and decides what to do next.
 4. **Anyone reading the repo.** If the process is in the PRD and the code, the tool is legible without watching me work.
 
-## 3. Three commands, and nothing that stays running
+## 3. Three pipelines, two provisioning commands, and nothing that stays running
 
 This binary reads and writes. It does not poll, watch, loop, retry on a timer, or hold a lock between runs. One invocation, one pipeline, one exit.
 
@@ -37,7 +37,18 @@ Each answers one question:
 - **`resolve`** — is there anything left in this review that we owe an answer to?
 - **`amend`** — has the issue moved since the PR was written, and does the patch still stand?
 
-Nothing chooses which of the three to run. That is the caller's job, and the reason this stays a set of commands rather than a framework: scheduling, polling, queues, leases and work-in-progress limits belong to whatever sits above this and knows what it wants to spend.
+Two more commands take a repo and never a URL:
+
+```
+agent-runner env-check [--repo <path>] [--json]
+agent-runner env-init  [--repo <path>] [--apply] [--json]
+```
+
+`env-check` answers whether the environment this repo declares is present and intact. `env-init` builds it, printing the plan unless `--apply` is passed. Neither touches a thread: they answer for the machine, and §6.4 is the contract.
+
+They are separate commands because a pipeline that installs a toolchain is a pipeline that changes the host, which is the one thing §6.2 forbids a run to do. And because "this machine cannot run this repo" has to arrive at the front door — `env-check` before any work, exit `6` (§13) — instead of at the gate, after the work, looking like a patch that broke the tests.
+
+Nothing chooses which of the three pipelines to run. That is the caller's job, and the reason this stays a set of commands rather than a framework: scheduling, polling, queues, leases and work-in-progress limits belong to whatever sits above this and knows what it wants to spend.
 
 ### The thread is the unit, even for one command
 
@@ -82,7 +93,7 @@ The last row is the cheap one. Scope announced before the run started is scope t
 
 ### Each pipeline is a chain, and it is strict
 
-Each command runs a fixed stage list and does one job. Nothing improvises a stage, and nothing expands scope mid-review. Stages share one tool set and one record shape, which is what lets the three commands be run back to back without a translation layer between them.
+Each command runs a fixed stage list and does one job. Nothing improvises a stage, and nothing expands scope mid-review. Stages share one tool set and one record shape, which is what lets the three pipelines be run back to back without a translation layer between them.
 
 `resolve` is **strictly responsive**: it does not improve the neighbourhood while a reviewer is reading. If it spots something the reviewer did not raise, it says so in the reply and leaves the change to a separate `build` run. Widening scope inside somebody's review is how a contributor stops being asked back.
 
@@ -157,7 +168,7 @@ A worktree confines the diff. It does not confine the process, and the process i
 The rule is therefore about the host, not the checkout: **a run changes nothing on this machine outside its own run directory.** Concretely:
 
 - **No writes outside the run directory.** Not `$HOME`, not `/etc`, not a neighbouring repo, not the package manager's global store. `TMPDIR` is set to a directory inside the run and inherited by children, so a tool that wants scratch space gets it there.
-- **No installs, no services, no schedulers.** A gate that needs a toolchain the host lacks is a refusal (§11), not an invitation to `apt-get install` something. The worker never starts a daemon, edits a crontab, or registers a git hook in the parent repo beyond the worktree entry it cleans up.
+- **No installs, no services, no schedulers.** A run installs nothing on this host. The toolchain it needs was provisioned before it started, by a command that is not a run (§6.4), and is bound in read-only. A gate that meets a program the environment does not have is a refusal (§11), not an invitation to `apt-get install` something. The worker never starts a daemon, edits a crontab, or registers a git hook in the parent repo beyond the worktree entry it cleans up.
 - **No long-lived processes.** Every command runs under a timeout, in its own process group, and the group is killed on exit. A command that tries to daemonise is killed with its children; a run never leaves something behind holding a port.
 - **Network is an allowlist, not the internet.** `github.com` for `gh` and `git`, plus the model endpoint, and nothing else. A test that reaches a real service is exactly the class of test that should not run unattended, and an issue body that instructs the worker to fetch a URL does not get to become a request.
 - **The blast radius should be a namespace, not a convention.** `--sandbox container` (bubblewrap or `unshare` when present) is the default where the kernel allows it; `--sandbox worktree` is the fallback and prints a warning naming what is unenforced. Convention is not isolation; the flag exists so the weaker mode is a visible choice.
@@ -192,6 +203,17 @@ Rules it will not break:
 - A worktree whose run directory has already gone is an orphan: prune the directory and run `git worktree prune` on the parent repo, so the parent does not accumulate entries pointing at nothing.
 - Deleting a worktree never deletes the branch on the remote. The PR is evidence; the checkout is scratch.
 - `--json` reports what was freed, per run, so the daily disk question has a number instead of a feeling.
+
+### 6.4 The environment a run needs
+
+A repo declares what it takes to build and test it, and a run on a machine that cannot execute that declaration produces nothing worth reviewing. So the environment is an input, handled like the worktree: named, recorded, and prepared before the run rather than improvised inside it.
+
+- **Declared, not discovered.** The declaration is what the repo already says — `go.mod`'s go directive, `package.json`'s engines, package manager and lockfile, `rust-toolchain.toml`, `.python-version` or `requires-python`, the base image a `Dockerfile` names — plus an optional `agent-runner.env.toml` for what those cannot express: system packages, services, environment variables. Each entry keeps the file that justified it, so `env-init` can say why it wants to install something. A repo that declares nothing has an empty declaration and a digest, not an error; `env-init` is the command that refuses.
+- **A digest names it.** The digest is a hash over the normalised declaration and the bytes of the declaring files: an edit that changes nothing that matters leaves it alone, a version bump changes it. The decision is a comparison, not a judgement — `env-check` asks whether the directory at that digest exists and is intact, and a run records the digest it was bound to.
+- **It lives in the state dir, and nothing enters the host.** `${XDG_STATE_HOME:-~/.local/state}/agent-runner/envs/<digest>/` holds `env.json` (the declaration, the resolved tools and versions, sizes, when it was built), `bin/`, `lib/` and `share/`. Every tool in it was installed inside that directory — `PATH`, `GOPATH`, `CARGO_HOME`, `npm_config_prefix` all point into it — never into `$HOME`, `/usr/local` or the system package manager. It is built in a temporary sibling and renamed on success, as the run record is, so a failed init leaves no half-environment that `env-check` could accept.
+- **Read-only in the run.** `--sandbox container` binds `envs/<digest>` read-only at `/opt/env` and puts `/opt/env/bin` first on `PATH`; the run's `TMPDIR` stays inside the run, not the environment. `--sandbox worktree` gets the same `PATH` prefix and nothing else, and says so in the record, which is the honesty §6.1 already applies to the diff. `run.json` gains `env_digest`, so a run names its environment the way it names its branch and base sha.
+- **Shared without contention.** Being read-only, one environment serves every run on its digest: no lock, no per-run copy, no warm-up step. An environment that is missing or torn when a run starts is exit `6` before any work, never a run that discovers half a toolchain at the gate.
+- **Provisioning is a command, and it is recorded.** `env-init` is the only thing that writes under `envs/`, and what it did is an artifact inside the environment: `env.json`, plus `env.ndjson` with one line per step. A run reads that record; it never writes it. The trust it asks for, downloading a toolchain and choosing its source, is why it is a command someone ran with a plan to read first, and not a side effect of a pipeline.
 
 ## 7. Pipeline: `build` (issue to PR)
 
@@ -278,12 +300,14 @@ The worker refuses, with a printed reason, when:
 - the issue is closed, already fixed by a merged PR, or claimed by another person;
 - the task needs a CLA the operator has not signed;
 - the repo's CONTRIBUTING forbids unattended agents;
-- the gate cannot run in this sandbox (missing toolchain, network-only test);
+- the gate runs, but a program it calls is not in the environment — the shell said 127, and the refusal names the program;
 - the diff would touch a path outside the write scope;
 - a command tries to write outside the run directory, or reach a host outside the network allowlist;
 - `resolve` is pointed at a PR we do not own;
 - a thread's PR was closed without merging, and the next step would be a replacement PR.
 - the route implies `--force` and the pipeline's preconditions do not hold.
+
+A missing *environment* is not one of these. It is exit `6` at the front door (§6.4), before the run starts: the answer is `env-init`, not a different subject, and §13 keeps the two codes apart. A test that can only reach the network is still a refusal.
 
 A refusal is a successful run. Stopping costs a maintainer nothing; a confident wrong PR costs them a review.
 
@@ -310,6 +334,9 @@ A refusal is a successful run. Stopping costs a maintainer nothing; a confident 
 | 3 | Refused (see §11) |
 | 4 | Needs a human: ambiguous scope, a question only the maintainer can answer |
 | 5 | Budget exhausted |
+| 6 | Environment not ready: run `env-init`, then retry (§6.4) |
+
+`6` is not `3`. A caller that sees `3` changes the subject; a caller that sees `6` provisions the environment and calls the same command again with the same arguments. Two codes whose next step differs that much cannot be one code.
 
 ## 14. Non-goals
 
@@ -320,7 +347,7 @@ A refusal is a successful run. Stopping costs a maintainer nothing; a confident 
 - An agent protocol. This is a batch process with a paper trail; interactive transports are a separate concern at one seam, stage 4's implementer, and they can be added there without changing the shape.
 - Owning a clock. Scheduling is the caller's problem by design.
 - Watchers, daemons, pollers, queues, leases or work-in-progress limits. Those are the meta framework's job: it decides which thread gets a command and when. A `watch` command inside this binary would be the first step of turning a tool into a service, and the moment that happens the pipelines stop being testable in isolation.
-- Deciding which of the three commands to run. Routing on "what changed" looks helpful and duplicates a decision the caller has to make anyway.
+- Deciding which of the three pipelines to run. Routing on "what changed" looks helpful and duplicates a decision the caller has to make anyway.
 - Deleting anything on its own initiative, beyond the one exception in §6.3: a run that finished done removes the worktree it wrote in, as its last recorded step. Everything else that removes files is `gc`, a command with a dry run.
 
 ## 14.1 Where the meta framework goes
@@ -329,7 +356,7 @@ Scheduling a `resolve` every ten minutes, holding a queue of issues, enforcing o
 
 The contract between the two is deliberately small:
 
-- a command takes a URL and a repo path, and exits with a code from §13;
+- a pipeline command takes a URL and a repo path, and exits with a code from §13;
 - `--json` on stdout describes what happened, in a shape that does not change between runs;
 - a run record on disk describes how it happened, and can be replayed.
 
@@ -350,6 +377,7 @@ If a scheduler needs more than that, the scheduler is doing something the pipeli
 | Worktree per run (filesystem scope) | **missing** |
 | Machine isolation: no writes outside, network allowlist, process-group timeouts, container default | **missing** |
 | `gc` with dry run, two tiers, orphan pruning | **missing** |
+| Environment as an input: `env-check`, `env-init`, digest and state layout | **missing** |
 | Real LLM client | **missing** — the loop runs on a deterministic mock |
 | Gate runner | **missing** |
 | `gh` and git operations | **missing** |

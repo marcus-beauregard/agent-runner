@@ -30,7 +30,7 @@ const (
 	ClaimedByOther     Code = "claimed-by-other"    // someone else is on it
 	CLAUnsigned        Code = "cla-unsigned"        // the task needs a CLA nobody signed
 	AgentsForbidden    Code = "agents-forbidden"    // CONTRIBUTING forbids unattended agents
-	GateUnavailable    Code = "gate-unavailable"    // the gate cannot run in this sandbox
+	GateUnavailable    Code = "gate-unavailable"    // a program the gate called is absent
 	OutsideWriteScope  Code = "outside-write-scope" // the diff would leave the write scope
 	OutsideRunDir      Code = "outside-run-dir"     // a command wrote outside the run directory
 	HostNotAllowed     Code = "host-not-allowed"    // a request reached an off-allowlist host
@@ -38,9 +38,9 @@ const (
 	PRClosedUnmerged   Code = "pr-closed-unmerged"  // the thread's PR closed without merging
 	ForcePreconditions Code = "force-preconditions" // --force implied, preconditions unmet
 
-	// ToolUnavailable is the cause §11 implies in "the gate cannot run in this
-	// sandbox": the plan needs a tool this host does not have, or a gh that
-	// cannot answer.
+	// ToolUnavailable is the cause §11 implies but does not name: the plan needs
+	// a tool this host does not have, or a gh that cannot answer. A missing
+	// environment is not this one — that is exit 6 before the run starts (§6.4).
 	ToolUnavailable Code = "tool-unavailable"
 	// SandboxUnavailable is a container sandbox asked for on a host that cannot
 	// build one. It is a refusal, never a silent downgrade (PRD §6.2).

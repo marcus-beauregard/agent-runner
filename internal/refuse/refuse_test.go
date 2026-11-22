@@ -82,7 +82,7 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.AgentsForbidden},
 		},
 		{
-			cause: "the gate cannot run in this sandbox (missing toolchain, network-only test)",
+			cause: "the gate runs, but a program it calls is not in the environment — the shell said 127, and the refusal names the program",
 			codes: []refuse.Code{refuse.GateUnavailable},
 		},
 		{
