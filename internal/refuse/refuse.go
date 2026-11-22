@@ -22,25 +22,28 @@ var ErrRefused = errors.New("refused")
 type Code string
 
 // The vocabulary. The first block is PRD §11's list, one code per cause it
-// names; the second block holds the two causes the binary produces today that
-// §11 implies without naming.
+// names; the second block holds the two the binary produces today that §11
+// does not name.
 const (
-	IssueClosed        Code = "issue-closed"        // the issue is closed
-	AlreadyFixed       Code = "already-fixed"       // a merged PR already fixed it
-	ClaimedByOther     Code = "claimed-by-other"    // someone else is on it
-	CLAUnsigned        Code = "cla-unsigned"        // the task needs a CLA nobody signed
-	AgentsForbidden    Code = "agents-forbidden"    // CONTRIBUTING forbids unattended agents
-	GateUnavailable    Code = "gate-unavailable"    // the gate cannot run in this sandbox
-	OutsideWriteScope  Code = "outside-write-scope" // the diff would leave the write scope
-	OutsideRunDir      Code = "outside-run-dir"     // a command wrote outside the run directory
-	HostNotAllowed     Code = "host-not-allowed"    // a request reached an off-allowlist host
-	NotOurPR           Code = "not-our-pr"          // resolve was pointed at a PR we do not own
-	PRClosedUnmerged   Code = "pr-closed-unmerged"  // the thread's PR closed without merging
-	ForcePreconditions Code = "force-preconditions" // --force implied, preconditions unmet
+	IssueClosed           Code = "issue-closed"           // the issue is closed
+	AlreadyFixed          Code = "already-fixed"          // a merged PR already fixed it
+	ClaimedByOther        Code = "claimed-by-other"       // someone else is on it
+	CLAUnsigned           Code = "cla-unsigned"           // the task needs a CLA nobody signed
+	AgentsForbidden       Code = "agents-forbidden"       // CONTRIBUTING forbids unattended agents
+	DependencyUnavailable Code = "dependency-unavailable" // a source off the fetch list
+	ManagerUnavailable    Code = "manager-unavailable"    // a package manager the deps stage cannot run
+	GateUnavailable       Code = "gate-unavailable"       // a program the gate called could not run
+	OutsideWriteScope     Code = "outside-write-scope"    // the diff would leave the write scope
+	OutsideRunDir         Code = "outside-run-dir"        // a command wrote outside the run directory
+	HostNotAllowed        Code = "host-not-allowed"       // a request reached an off-allowlist host
+	NotOurPR              Code = "not-our-pr"             // resolve was pointed at a PR we do not own
+	PRClosedUnmerged      Code = "pr-closed-unmerged"     // the thread's PR closed without merging
+	ForcePreconditions    Code = "force-preconditions"    // --force implied, preconditions unmet
 
-	// ToolUnavailable is the cause §11 implies in "the gate cannot run in this
-	// sandbox": the plan needs a tool this host does not have, or a gh that
-	// cannot answer.
+	// ToolUnavailable is a plan-stage need this host cannot meet — a gh that
+	// cannot answer — and §11 does not name it; the coverage test maps causes to
+	// codes, so it cannot see a code without a cause. A missing environment is
+	// not this one: that is exit 6 before the run starts (§6.4).
 	ToolUnavailable Code = "tool-unavailable"
 	// SandboxUnavailable is a container sandbox asked for on a host that cannot
 	// build one. It is a refusal, never a silent downgrade (PRD §6.2).
@@ -55,6 +58,8 @@ var all = []Code{
 	ClaimedByOther,
 	CLAUnsigned,
 	AgentsForbidden,
+	DependencyUnavailable,
+	ManagerUnavailable,
 	GateUnavailable,
 	OutsideWriteScope,
 	OutsideRunDir,
