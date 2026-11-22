@@ -62,8 +62,9 @@ type Result struct {
 	Exit int
 	// Duration is wall clock, as a person reads it rather than as a statistic.
 	Duration time.Duration
-	// Tail is the end of what the gate printed, both streams in the order they
-	// were written, without a trailing newline.
+	// Tail is the end of what the gate printed — both streams, in the order each
+	// stream wrote them — without a trailing newline. Two streams are copied by
+	// two readers, so the order holds within a stream, not across the two.
 	Tail string
 	// Missing names the programs the shell said it could not find, in the order
 	// it said so, without repeats.
