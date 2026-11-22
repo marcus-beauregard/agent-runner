@@ -221,8 +221,33 @@ func TestRunDeadlineReleasesAChildHoldingThePipe(t *testing.T) {
 	} else if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want a deadline", err)
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("Run took %v after a 200ms deadline; a child kept the pipe open", elapsed)
+	// The bound is the deadline plus the wait delay plus room for the
+	// scheduler: a wait delay that crept to seconds fails here rather than
+	// overrunning a budget unnoticed.
+	if elapsed, limit := time.Since(start), 200*time.Millisecond+waitDelay+time.Second; elapsed > limit {
+		t.Errorf("Run took %v after a 200ms deadline, want under %v", elapsed, limit)
+	}
+}
+
+// TestRunKeepsTheAnswerWhenAChildOutlivesTheGate: waitDelay ends the wait for a
+// pipe a background child kept open; it does not turn a gate that ran and
+// passed into one that could not start. The exit code is the answer whether or
+// not the gate cleaned up after itself.
+func TestRunKeepsTheAnswerWhenAChildOutlivesTheGate(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is not installed here")
+	}
+	t.Setenv("PATH", onlyPath(t, "sleep"))
+	start := time.Now()
+	got, err := Run(context.Background(), t.TempDir(), "sleep 30 & true")
+	if err != nil {
+		t.Fatalf("run a gate that left a child behind: %v", err)
+	}
+	if got.Exit != 0 {
+		t.Errorf("exit = %d, want the shell's 0", got.Exit)
+	}
+	if elapsed := time.Since(start); elapsed > 2*waitDelay+time.Second {
+		t.Errorf("Run took %v, want the wait delay to end it", elapsed)
 	}
 }
 

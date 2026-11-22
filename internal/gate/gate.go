@@ -87,8 +87,11 @@ func (r Result) Unavailable() bool {
 //
 // A gate that exits non-zero is a Result, not an error: the exit code is the
 // gate's answer, and what it means for the run is the caller's decision. The
-// error is reserved for a gate that could not be started at all and for a
-// context that ended, where there is no answer to report.
+// error is reserved for a gate that could not be started at all, for a context
+// that ended, and for a group that could not be killed, where there is no
+// answer to report or no clean host to leave. A child the gate left behind is
+// not an error either: killProcessGroup reaps it after the shell exits, and the
+// shell's exit status still stands.
 func Run(ctx context.Context, dir, command string) (Result, error) {
 	cmd := exec.CommandContext(ctx, shell, "-c", command)
 	cmd.Dir = dir
@@ -97,12 +100,18 @@ func Run(ctx context.Context, dir, command string) (Result, error) {
 	// WaitDelay bounds that wait: after the shell exits or the context ends, the
 	// pipe is closed and Run returns with the answer it has.
 	cmd.WaitDelay = waitDelay
+	setProcessGroup(cmd)
 	var out tailWriter
 	var said finder
 	cmd.Stdout = &out
 	cmd.Stderr = io.MultiWriter(&out, &said)
 	start := time.Now()
 	runErr := cmd.Run()
+	// Whatever is still in the group outlived the shell: a background child the
+	// gate started. It is killed here, not at the run's exit, because PRD §12
+	// says a run leaves no process behind, and this is the last moment the gate
+	// can be held to it.
+	_, killErr := killProcessGroup(cmd)
 	result := Result{Command: command, Exit: -1, Duration: time.Since(start)}
 	if cmd.ProcessState != nil {
 		result.Exit = cmd.ProcessState.ExitCode()
@@ -110,11 +119,20 @@ func Run(ctx context.Context, dir, command string) (Result, error) {
 	said.flush()
 	result.Missing = said.missing
 	result.Tail = out.tail()
+	if killErr != nil {
+		return result, fmt.Errorf("kill gate process group: %w", killErr)
+	}
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("run gate: %w", err)
 	}
 	var exit *exec.ExitError
-	if runErr != nil && !errors.As(runErr, &exit) {
+	switch {
+	case runErr == nil, errors.As(runErr, &exit):
+	case errors.Is(runErr, exec.ErrWaitDelay):
+		// The shell exited and a child kept its pipe open past waitDelay. The
+		// wait is over and the gate still answered, so this is not a failure to
+		// start: the exit code in result is the answer.
+	default:
 		return result, fmt.Errorf("run gate: %w", runErr)
 	}
 	return result, nil
