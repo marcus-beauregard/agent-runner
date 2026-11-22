@@ -82,7 +82,7 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.AgentsForbidden},
 		},
 		{
-			cause: "a declared dependency resolves outside the registries stage 4 may reach — a private module, a self-hosted git, a registry override",
+			cause: "a declared dependency resolves outside the registries the deps stage may reach — a private module, a self-hosted git, a registry override",
 			codes: []refuse.Code{refuse.DependencyUnavailable},
 		},
 		{
