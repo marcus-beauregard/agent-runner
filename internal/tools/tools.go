@@ -454,7 +454,15 @@ func (r *Registry) writeFile(ctx context.Context, args map[string]any) (string, 
 		return "", err
 	}
 	if err := r.checkPath(name); err != nil {
-		return "", err
+		// A write outside the working directory is PRD §11's refusal, not a
+		// tool error the model can read and work around: nothing was written,
+		// and the run's answer to an attempt to leave its scope is to stop.
+		// read_file keeps returning the plain error, because §11 refuses a
+		// write that leaves the scope, not a read that was rejected.
+		ref := refuse.New(refuse.OutsideWriteScope, "tool",
+			"write_file would write outside the run directory")
+		ref.Evidence = map[string]string{"path": name, "check": err.Error()}
+		return "", ref
 	}
 	if err := os.WriteFile(filepath.Join(r.root, name), []byte(content), 0o644); err != nil {
 		return "", err

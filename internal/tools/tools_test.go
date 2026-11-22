@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 	runrec "github.com/marcus-beauregard/agent-runner/internal/run"
 )
 
@@ -226,7 +227,23 @@ func TestReadWriteFileConfinement(t *testing.T) {
 	_, err := r.Run(context.Background(), "read_file", map[string]any{"path": "/etc/passwd"})
 	wantErr(t, err, "path escapes the working directory")
 	_, err = r.Run(context.Background(), "write_file", map[string]any{"path": "../out.txt", "content": "x"})
-	wantErr(t, err, "path escapes the working directory")
+	// A write that leaves the root is a refusal, not an error string: the run
+	// stops on it, and the report has to be able to name what was attempted.
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		t.Fatalf("write_file outside the root = %v, want a *refuse.Refusal", err)
+	}
+	if ref.Code != refuse.OutsideWriteScope {
+		t.Errorf("refusal code = %q, want %q", ref.Code, refuse.OutsideWriteScope)
+	}
+	if got := ref.Evidence["path"]; got != "../out.txt" {
+		t.Errorf("evidence path = %q, want ../out.txt", got)
+	}
+	// The check that refused it is in the evidence, so a reader can see which
+	// rule the path broke without re-running the tool.
+	if got := ref.Evidence["check"]; !strings.Contains(got, "path escapes the working directory") {
+		t.Errorf("evidence check = %q, want the path rule that refused it", got)
+	}
 
 	out, err := r.Run(context.Background(), "write_file", map[string]any{"path": "new.txt", "content": "hello"})
 	if err != nil {

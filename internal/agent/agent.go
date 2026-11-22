@@ -5,10 +5,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/marcus-beauregard/agent-runner/internal/refuse"
 )
 
 // LLM is the model the loop drives. Complete returns the next reply for a
@@ -119,6 +122,15 @@ func Run(ctx context.Context, task string, llm LLM, opts Options, ts Toolset) (R
 		}
 		observation, err := ts.Run(ctx, action.Name, action.Args)
 		if err != nil {
+			// A tool that failed is an observation: a command that exited
+			// non-zero, a file that is not there, a path that was wrong — the
+			// model can read that and try something else. A refusal is not
+			// advice. It is the run's answer to what was asked for, and the
+			// model does not get to talk its way around it, so the loop stops
+			// here and the caller records why.
+			if errors.Is(err, refuse.ErrRefused) {
+				return Result{Steps: step + 1, Transcript: transcript}, err
+			}
 			observation = "ERROR: " + err.Error()
 		}
 		transcript = append(transcript, Turn{Role: "tool", Tool: action.Name, Observation: observation})
