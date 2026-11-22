@@ -374,10 +374,20 @@ func (r *Registry) checkPath(arg string) error {
 }
 
 // resolvePath follows symlinks at the deepest ancestor of probe that exists and
-// reattaches the part that does not, so a symlink cannot smuggle a path out of
-// the root by pointing at a name the walk never reaches. arg is only used in
-// the errors.
+// reattaches the part that does not. A symlink is followed even when its target
+// does not exist yet: EvalSymlinks stops at the missing target and would leave
+// the link itself looking like a plain path, so writing through it would land
+// wherever it points. arg is only used in the errors.
 func resolvePath(probe, arg string) (string, error) {
+	return resolveWithin(probe, arg, 0)
+}
+
+// resolveWithin is resolvePath with a hop budget, because a symlink can point
+// at itself or at another link forever.
+func resolveWithin(probe, arg string, hops int) (string, error) {
+	if hops > 32 {
+		return "", fmt.Errorf("too many links: %s", arg)
+	}
 	missing := make([]string, 0)
 	for {
 		real, err := filepath.EvalSymlinks(probe)
@@ -386,6 +396,20 @@ func resolvePath(probe, arg string) (string, error) {
 		}
 		if !isNotFound(err) {
 			return "", err
+		}
+		if info, lerr := os.Lstat(probe); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, rerr := os.Readlink(probe)
+			if rerr != nil {
+				return "", rerr
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(probe), target)
+			}
+			resolved, rerr := resolveWithin(target, arg, hops+1)
+			if rerr != nil {
+				return "", rerr
+			}
+			return filepath.Join(append([]string{resolved}, missing...)...), nil
 		}
 		parent := filepath.Dir(probe)
 		if parent == probe {

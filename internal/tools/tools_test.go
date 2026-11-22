@@ -327,6 +327,36 @@ func TestAbsolutePathIsJudgedAfterResolution(t *testing.T) {
 	}
 }
 
+// TestWriteFileFollowsADanglingSymlink is the escape EvalSymlinks alone misses:
+// the link resolves, its target does not exist yet, so the walk sees a missing
+// file inside the root and the write follows the link out of it.
+func TestWriteFileFollowsADanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	outside := filepath.Join(dir, "outside")
+	for _, d := range []string{work, outside} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escaped := filepath.Join(outside, "new.txt")
+	if err := os.Symlink(escaped, filepath.Join(work, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Run(context.Background(), "write_file", map[string]any{"path": "link.txt", "content": "x"})
+	var ref *refuse.Refusal
+	if !errors.As(err, &ref) {
+		t.Fatalf("write_file through a dangling symlink = %v, want a refusal", err)
+	}
+	if _, statErr := os.Stat(escaped); !os.IsNotExist(statErr) {
+		t.Errorf("the write followed the link outside the root: %v", statErr)
+	}
+}
+
 func TestReadFileRefusesSymlinkEscape(t *testing.T) {
 	dir := t.TempDir()
 	work := filepath.Join(dir, "work")
