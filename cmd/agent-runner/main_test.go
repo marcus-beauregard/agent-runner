@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,12 +27,19 @@ import (
 func stubGH(t *testing.T, out string, code int) {
 	t.Helper()
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf '%s\\n' '" + out + "'\nexit " + strconv.Itoa(code) + "\n"
 	path := filepath.Join(dir, "gh")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(ghScript(out, code)), 0o755); err != nil {
 		t.Fatalf("write gh stub: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// ghScript is the body of a gh that prints out and exits with code. Naming it
+// separately lets a test put one answer on a PATH that holds nothing else, which
+// is how the plan stage is made to refuse for the host's reasons rather than for
+// whatever this machine happens to have installed.
+func ghScript(out string, code int) string {
+	return "#!/bin/sh\nprintf '%s\\n' '" + out + "'\nexit " + strconv.Itoa(code) + "\n"
 }
 
 // stubPATH puts exactly these scripts on PATH, alone: detection and the plan
@@ -799,46 +807,137 @@ func TestWorkSandboxFlag(t *testing.T) {
 	}
 }
 
-// TestWorkRecordsWhyItRefused is the ticket's claim at the binary: a run that
-// refuses names its cause in run.json — code, stage, reason, evidence — and the
-// report repeats it, instead of the record saying only that it stopped.
+// ghClosedIssue and ghClaimedIssue are the two states the plan stage refuses
+// on: the issue is over, or another person already has it.
+const (
+	ghClosedIssue  = `{"number":27,"title":"Record","state":"CLOSED","assignees":[]}`
+	ghClaimedIssue = `{"number":27,"title":"Record","state":"OPEN","assignees":[{"login":"someone-else"}]}`
+)
+
+// refusalCase is one cause the plan stage can raise, fed through the command:
+// what the host looks like, and what the run has to say afterwards.
+type refusalCase struct {
+	name     string
+	path     map[string]string // exactly the programs on PATH; nothing means none
+	code     string            // the code in the record, the report and the stream
+	reason   string            // the sentence every reader has to say, exactly
+	evidence map[string]string // key to the value it must hold; "" wants a non-empty one
+}
+
+// TestWorkRecordsWhyItRefused is the ticket's claim at the binary, one row per
+// cause the plan stage can raise: a run that refuses names its cause in run.json
+// — code, stage, reason, evidence — the report repeats it in the same words, and
+// the stream holds exactly one refusal event saying the same thing. Only causes
+// the binary has a stage for get a row; a cause with nothing to raise it would
+// prove the table compiles and nothing else.
 func TestWorkRecordsWhyItRefused(t *testing.T) {
-	closed := `{"number":27,"title":"Record","state":"CLOSED","assignees":[]}`
-	base := t.TempDir()
-	stubGH(t, closed, 0)
-	ref := "https://example.test/issues/27"
-	if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run"}); code != 3 {
-		t.Fatalf("exit code = %d, want 3", code)
+	tests := []refusalCase{
+		{
+			name:     "issue closed",
+			path:     map[string]string{"gh": ghScript(ghClosedIssue, 0)},
+			code:     "issue-closed",
+			reason:   "issue is closed",
+			evidence: map[string]string{"state": "CLOSED"},
+		},
+		{
+			name:     "claimed by another",
+			path:     map[string]string{"gh": ghScript(ghClaimedIssue, 0)},
+			code:     "claimed-by-other",
+			reason:   "issue is claimed by someone-else",
+			evidence: map[string]string{"assignees": "someone-else"},
+		},
+		{
+			name:     "tool unavailable",
+			path:     map[string]string{},
+			code:     "tool-unavailable",
+			reason:   "gh CLI is not available",
+			evidence: map[string]string{"error": ""},
+		},
 	}
-	rec := onlyRun(t, base)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			stubPATH(t, tc.path)
+			ref := "https://example.test/issues/27"
+			if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run"}); code != 3 {
+				t.Fatalf("exit code = %d, want 3", code)
+			}
+			rec := onlyRun(t, base)
+			if rec.State != "refused" {
+				t.Errorf("state = %q, want refused", rec.State)
+			}
+			dir, err := runrec.Locate(base, rec.ID)
+			if err != nil {
+				t.Fatalf("locate run: %v", err)
+			}
+			checkRefusal(t, dir, rec, tc)
+		})
+	}
+}
+
+// checkRefusal asserts one refusal everywhere a reader meets it: the record, the
+// report, and the stream. All three have to agree on the code, the stage and the
+// words, or the record is a summary of a refusal rather than the refusal.
+func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
+	t.Helper()
 	if rec.Refusal == nil {
 		t.Fatal("no refusal recorded")
 	}
-	if rec.Refusal.Code != "issue-closed" {
-		t.Errorf("refusal code = %q, want issue-closed", rec.Refusal.Code)
+	// The ticket's headline is "refusals exit 3", and run.json is where a reader
+	// goes to learn what a run did: a process code with no record behind it is a
+	// run whose directory lies about how it ended.
+	switch {
+	case rec.ExitCode == nil:
+		t.Error("record has no exit code, want 3")
+	case *rec.ExitCode != 3:
+		t.Errorf("record exit code = %d, want 3", *rec.ExitCode)
+	}
+	if rec.Refusal.Code != tc.code {
+		t.Errorf("refusal code = %q, want %q", rec.Refusal.Code, tc.code)
 	}
 	if rec.Refusal.Where != "plan" {
 		t.Errorf("refusal stage = %q, want plan", rec.Refusal.Where)
 	}
-	if !strings.Contains(rec.Refusal.Reason, "closed") {
-		t.Errorf("refusal reason = %q, want it to say the issue is closed", rec.Refusal.Reason)
+	// Exact, not a phrase: "the issue is not closed" carries "issue is closed"
+	// and says the opposite, so a substring is not a check on the words.
+	if rec.Refusal.Reason != tc.reason {
+		t.Errorf("refusal reason = %q, want %q", rec.Refusal.Reason, tc.reason)
 	}
-	if got := rec.Refusal.Evidence["state"]; got != "CLOSED" {
-		t.Errorf("evidence state = %q, want CLOSED", got)
-	}
-	dir, err := runrec.Locate(base, rec.ID)
-	if err != nil {
-		t.Fatalf("locate run: %v", err)
-	}
+	checkEvidence(t, "record", rec.Refusal.Evidence, tc.evidence)
+
 	out, err := runrec.RenderReport(dir)
 	if err != nil {
 		t.Fatalf("render report: %v", err)
 	}
-	if !strings.Contains(string(out), "- Code: issue-closed") {
-		t.Errorf("report does not name the refusal:\n%s", out)
+	// The section, not the document: a line that matches somewhere else in the
+	// report says nothing about what the refusal section holds. Every line below
+	// has to be a whole line of that section.
+	section := reportSection(t, string(out), "## Refused")
+	want := []string{
+		"- Stage: plan",
+		"- Code: " + tc.code,
+		"- Reason: " + rec.Refusal.Reason,
+		"- Evidence:",
 	}
-	// The stream carries the same refusal, at the same stage, in the same
-	// words: following the events alone has to say why the run stopped.
+	for key := range tc.evidence {
+		// A case that cannot write the value down (an error from the host) still
+		// has one in the record, and the report has to print that one.
+		value := tc.evidence[key]
+		if value == "" {
+			value = rec.Refusal.Evidence[key]
+		}
+		if value == "" {
+			t.Errorf("evidence %q is empty in the record; the report cannot carry it", key)
+			continue
+		}
+		want = append(want, "  - "+key+": "+value)
+	}
+	for _, line := range want {
+		if !hasLine(section, line) {
+			t.Errorf("Refused section has no line %q:\n%s", line, section)
+		}
+	}
+
 	events := refusalEvents(t, dir)
 	if len(events) != 1 {
 		t.Fatalf("refusal events = %d, want exactly one", len(events))
@@ -846,14 +945,61 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 	if events[0].Stage != "plan" {
 		t.Errorf("refusal event stage = %q, want plan", events[0].Stage)
 	}
-	if events[0].Data.Code != "issue-closed" {
-		t.Errorf("refusal event code = %q, want issue-closed", events[0].Data.Code)
+	if events[0].Data.Code != tc.code {
+		t.Errorf("refusal event code = %q, want %q", events[0].Data.Code, tc.code)
 	}
 	if events[0].Data.Reason != rec.Refusal.Reason {
 		t.Errorf("refusal event reason = %q, want %q", events[0].Data.Reason, rec.Refusal.Reason)
 	}
-	if got := events[0].Data.Evidence["state"]; got != "CLOSED" {
-		t.Errorf("refusal event evidence state = %q, want CLOSED", got)
+	checkEvidence(t, "refusal event", events[0].Data.Evidence, tc.evidence)
+	// The stream and the record are two copies of one refusal, so the maps are
+	// equal — not equal on the keys a case happened to name. A value the case
+	// cannot write down (the host's error) has to be the same value in both, or
+	// following the stream reaches a different story than reading run.json.
+	if !maps.Equal(events[0].Data.Evidence, rec.Refusal.Evidence) {
+		t.Errorf("refusal event evidence = %v, record holds %v", events[0].Data.Evidence, rec.Refusal.Evidence)
+	}
+}
+
+// reportSection returns the body of the report's section with the given heading,
+// up to the next heading.
+func reportSection(t *testing.T, doc, heading string) string {
+	t.Helper()
+	_, body, ok := strings.Cut(doc, heading+"\n")
+	if !ok {
+		t.Fatalf("report has no %q section:\n%s", heading, doc)
+	}
+	if next := strings.Index(body, "\n## "); next >= 0 {
+		body = body[:next]
+	}
+	return body
+}
+
+// hasLine reports whether section holds want as one whole line.
+func hasLine(section, want string) bool {
+	for _, line := range strings.Split(section, "\n") {
+		if line == want {
+			return true
+		}
+	}
+	return false
+}
+
+// checkEvidence is the evidence half of a refusal assertion: every key the case
+// names is there with the value it names — or, when it names none, with any
+// value at all, which is how a case pins an error it cannot write down.
+func checkEvidence(t *testing.T, where string, got, want map[string]string) {
+	t.Helper()
+	for key, value := range want {
+		have, ok := got[key]
+		switch {
+		case !ok:
+			t.Errorf("%s evidence has no %q: %v", where, key, got)
+		case have == "":
+			t.Errorf("%s evidence %s is empty, want the reason that was read", where, key)
+		case value != "" && have != value:
+			t.Errorf("%s evidence %s = %q, want %q", where, key, have, value)
+		}
 	}
 }
 
