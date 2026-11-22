@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -918,11 +919,6 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 		"- Reason: " + rec.Refusal.Reason,
 		"- Evidence:",
 	}
-	// The evidence is the part a reader checks the refusal against; a report that
-	// names the cause but not what it saw is a summary, not the refusal.
-	if !strings.Contains(string(out), "- Evidence:\n") {
-		t.Errorf("report has no evidence section:\n%s", out)
-	}
 	for key := range tc.evidence {
 		// A case that cannot write the value down (an error from the host) still
 		// has one in the record, and the report has to print that one.
@@ -956,13 +952,12 @@ func checkRefusal(t *testing.T, dir string, rec record, tc refusalCase) {
 		t.Errorf("refusal event reason = %q, want %q", events[0].Data.Reason, rec.Refusal.Reason)
 	}
 	checkEvidence(t, "refusal event", events[0].Data.Evidence, tc.evidence)
-	// The stream and the record are two copies of one refusal. A value the case
-	// cannot write down (the host's error) still has to be the same value in both,
-	// or following the stream reaches a different story than reading run.json.
-	for key := range tc.evidence {
-		if got, want := events[0].Data.Evidence[key], rec.Refusal.Evidence[key]; got != want {
-			t.Errorf("refusal event evidence %s = %q, record holds %q", key, got, want)
-		}
+	// The stream and the record are two copies of one refusal, so the maps are
+	// equal — not equal on the keys a case happened to name. A value the case
+	// cannot write down (the host's error) has to be the same value in both, or
+	// following the stream reaches a different story than reading run.json.
+	if !maps.Equal(events[0].Data.Evidence, rec.Refusal.Evidence) {
+		t.Errorf("refusal event evidence = %v, record holds %v", events[0].Data.Evidence, rec.Refusal.Evidence)
 	}
 }
 
