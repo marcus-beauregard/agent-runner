@@ -2,11 +2,13 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRunReadsWhatTheShellSaid is the table from the issue, measured rather
@@ -183,6 +185,28 @@ func TestRunEndedContextIsAnError(t *testing.T) {
 	cancel()
 	if _, err := Run(ctx, t.TempDir(), "true"); err == nil {
 		t.Fatal("run with a canceled context, want an error")
+	}
+}
+
+// TestRunDeadlineReleasesAChildHoldingThePipe: the deadline is the run's
+// ceiling, not a suggestion. A gate that backgrounds a child leaves the pipe
+// open, and without a wait delay Run would block until that child exited —
+// past the deadline, with no answer and no way for the caller to recover.
+func TestRunDeadlineReleasesAChildHoldingThePipe(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is not installed here")
+	}
+	t.Setenv("PATH", onlyPath(t, "sleep"))
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := Run(ctx, t.TempDir(), "sleep 10 & echo started"); err == nil {
+		t.Fatal("run a gate past its deadline, want an error")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want a deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Run took %v after a 200ms deadline; a child kept the pipe open", elapsed)
 	}
 }
 

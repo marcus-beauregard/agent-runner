@@ -35,6 +35,11 @@ const (
 	// newline. A shell's not-found line is short; anything longer is output, and
 	// dropping it costs a name at worst, never the exit code.
 	maxLine = 4 << 10
+	// waitDelay is how long Wait keeps reading a stream after the shell has
+	// exited or its context has ended. A gate that leaves a background child
+	// holding the pipe would otherwise block Run past the deadline it was given,
+	// and a caller cannot recover from a function that never returns.
+	waitDelay = time.Second
 )
 
 // notFound matches a shell's own report that a program is not on PATH, in the
@@ -83,6 +88,11 @@ func (r Result) Unavailable() bool {
 func Run(ctx context.Context, dir, command string) (Result, error) {
 	cmd := exec.CommandContext(ctx, shell, "-c", command)
 	cmd.Dir = dir
+	// The gate's streams are writers, so the shell's output reaches them through
+	// copying goroutines that a grandchild inheriting the pipe keeps alive.
+	// WaitDelay bounds that wait: after the shell exits or the context ends, the
+	// pipe is closed and Run returns with the answer it has.
+	cmd.WaitDelay = waitDelay
 	var out tailWriter
 	var said finder
 	cmd.Stdout = &out
