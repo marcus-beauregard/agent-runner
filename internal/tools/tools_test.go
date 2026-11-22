@@ -261,6 +261,26 @@ func TestReadWriteFileConfinement(t *testing.T) {
 	}
 }
 
+// TestWriteFileNamesTheEscape pins the other side of write_file's refusal:
+// only a path that actually leaves the root is PRD §11's escape. A ".." that
+// comes back in, or an absolute name that points inside, is a naming mistake
+// the model can correct — it must not end the run as a refusal, and the record
+// must not claim a cause that is not true.
+func TestWriteFileNamesTheEscape(t *testing.T) {
+	r := newRegistry(t)
+	for _, name := range []string{"sub/../ok.txt", filepath.Join(r.root, "abs.txt")} {
+		_, err := r.Run(context.Background(), "write_file", map[string]any{"path": name, "content": "x"})
+		if err == nil {
+			t.Errorf("write_file(%q) = nil, want the name refused", name)
+			continue
+		}
+		var ref *refuse.Refusal
+		if errors.As(err, &ref) {
+			t.Errorf("write_file(%q) = refusal %v, want a plain tool error", name, ref)
+		}
+	}
+}
+
 func TestReadFileRefusesSymlinkEscape(t *testing.T) {
 	dir := t.TempDir()
 	work := filepath.Join(dir, "work")

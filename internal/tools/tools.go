@@ -322,10 +322,16 @@ func isFlagValue(s string) bool {
 	return true
 }
 
+// errOutsideRoot marks the one path failure that really leaves the working
+// directory. checkPath refuses other names too — an absolute one, a ".." that
+// stays inside — but those are naming mistakes the model can correct, so only
+// this sentinel is PRD §11's escape and only it becomes a refusal.
+var errOutsideRoot = errors.New("path escapes the working directory")
+
 // escapes rejects a resolved path that is not the root or a child of it.
 func (r *Registry) escapes(arg, resolved, root string) error {
 	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
-		return fmt.Errorf("path escapes the working directory: %s", arg)
+		return fmt.Errorf("%w: %s", errOutsideRoot, arg)
 	}
 	return nil
 }
@@ -338,8 +344,19 @@ func (r *Registry) escapes(arg, resolved, root string) error {
 // file is reopened by name after the check and a swapped symlink would still
 // win the race.
 func (r *Registry) checkPath(arg string) error {
-	if strings.HasPrefix(arg, "/") || hasDotDot(arg) {
-		return fmt.Errorf("path escapes the working directory: %s", arg)
+	if strings.HasPrefix(arg, "/") {
+		if clean := filepath.Clean(arg); clean == r.root || strings.HasPrefix(clean, r.root+string(filepath.Separator)) {
+			return fmt.Errorf("name the path from the working directory, not absolutely: %s", arg)
+		}
+		return fmt.Errorf("%w: %s", errOutsideRoot, arg)
+	}
+	if hasDotDot(arg) {
+		// A ".." that climbs out of the root is an escape; one that comes back
+		// in ("a/../b.txt") is a sloppy name and nothing has left the scope.
+		if joined := filepath.Join(r.root, arg); joined != r.root && !strings.HasPrefix(joined, r.root+string(filepath.Separator)) {
+			return fmt.Errorf("%w: %s", errOutsideRoot, arg)
+		}
+		return fmt.Errorf("path must not contain \"..\": %s", arg)
 	}
 	probe := filepath.Join(r.root, arg)
 	missing := make([]string, 0)
@@ -454,11 +471,17 @@ func (r *Registry) writeFile(ctx context.Context, args map[string]any) (string, 
 		return "", err
 	}
 	if err := r.checkPath(name); err != nil {
-		// A write outside the working directory is PRD §11's refusal, not a
-		// tool error the model can read and work around: nothing was written,
-		// and the run's answer to an attempt to leave its scope is to stop.
-		// read_file keeps returning the plain error, because §11 refuses a
-		// write that leaves the scope, not a read that was rejected.
+		// Only the path that actually leaves the working directory is PRD
+		// §11's refusal, and a refusal is not advice: nothing was written, and
+		// the run's answer to an attempt to leave its scope is to stop. A name
+		// checkPath merely dislikes — an absolute one, a ".." that stays inside
+		// — is still a tool error the model can read and correct, so it must
+		// not end the run or be recorded as a cause that is not true.
+		// read_file keeps returning the plain error either way, because §11
+		// refuses a write that leaves the scope, not a read that was rejected.
+		if !errors.Is(err, errOutsideRoot) {
+			return "", err
+		}
 		ref := refuse.New(refuse.OutsideWriteScope, "tool",
 			"write_file would write outside the run directory")
 		ref.Evidence = map[string]string{"path": name, "check": err.Error()}
