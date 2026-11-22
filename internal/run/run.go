@@ -193,6 +193,12 @@ var ErrEventLost = errors.New("refusal recorded, event lost")
 // leaves a refusal someone can read. Such a failure is reported as ErrEventLost
 // rather than as a plain error: the refusal is recorded, and the caller's next
 // step is still Finish.
+//
+// Refuse adds one evidence entry the caller does not pass: refuse:again, when
+// the run before this one on the same subject refused too. The key belongs to
+// the record, so a caller that sets it gets it replaced — a refusal that named
+// some other run as its predecessor would be the record lying about what it
+// read.
 func (r *Run) Refuse(ref *refusal.Refusal) error {
 	if ref == nil {
 		return errors.New("refuse: nil refusal")
@@ -204,11 +210,21 @@ func (r *Run) Refuse(ref *refusal.Refusal) error {
 	if err != nil {
 		return err
 	}
+	// A refusal that repeats one on the same thread names the first. "In a row"
+	// is the whole claim: the run before this one on the same subject refused
+	// too, so a caller reading the two records can see the thread is looping
+	// rather than read the same answer as fresh work. A citation after a run
+	// that finished would say the opposite of what happened, so only a previous
+	// refusal counts as the run this one repeats.
+	evidence := ref.Evidence
+	if prev := previousRun(filepath.Dir(r.Dir), rec); repeats(prev) {
+		evidence = cited(ref.Evidence, prev)
+	}
 	rec.Refusal = &refusalRecord{
 		Code:     string(ref.Code),
 		Where:    ref.Where,
 		Reason:   ref.Reason,
-		Evidence: ref.Evidence,
+		Evidence: evidence,
 	}
 	if err := writeRecord(r.Dir, *rec); err != nil {
 		return err
@@ -218,11 +234,81 @@ func (r *Run) Refuse(ref *refusal.Refusal) error {
 	// after the record: an event about a refusal the record does not hold would
 	// be the only account of it, and the record is the one that counts.
 	if r.stream != nil {
-		if err := r.stream.Refusal(ref); err != nil {
+		// The event carries the evidence the record does, citation included, so
+		// a reader following the stream learns the run is repeating itself
+		// without opening run.json.
+		held := *ref
+		held.Evidence = evidence
+		if err := r.stream.Refusal(&held); err != nil {
 			return fmt.Errorf("%w: %v", ErrEventLost, err)
 		}
 	}
 	return nil
+}
+
+// previousRun returns the record of the run on the same subject that started
+// most recently before current, or nil when there is none. The runs directory
+// holds every attempt this base knows about, so a thread's history is read from
+// its siblings rather than from a second index that could disagree with them.
+// Runs are ordered by id, which carries the microsecond they started at; the
+// record's CreatedAt stops at a second and cannot order two runs within one.
+//
+// A sibling that cannot be read is skipped: a record nobody can parse is not
+// evidence that the next refusal repeats one, and failing over it would lose
+// the refusal the caller came to record.
+func previousRun(root string, current *record) *record {
+	if current.Subject == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var latest *record
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == current.ID {
+			continue
+		}
+		rec, err := loadRecord(filepath.Join(root, e.Name()))
+		if err != nil || rec.Subject != current.Subject || rec.ID == current.ID {
+			continue
+		}
+		// The order comes from the id, not from CreatedAt: an id begins with
+		// the microsecond the run started, while CreatedAt is RFC 3339 and only
+		// reaches a second, so two runs in one second would be ordered by
+		// chance — and a run that started after this one could be read as the
+		// one before it.
+		if rec.ID > current.ID {
+			continue
+		}
+		if latest == nil || rec.ID > latest.ID {
+			latest = rec
+		}
+	}
+	return latest
+}
+
+// repeats reports whether prev is a refusal this run's refusal answers: a run
+// that ended refused, with the record of it still holding the reason.
+func repeats(prev *record) bool {
+	return prev != nil && prev.State == stateRefused && prev.Refusal != nil
+}
+
+// cited returns evidence with the refusal before this one added under
+// refuse:again. The map is copied rather than edited: a refusal belongs to the
+// caller that built it, and a recorder that changed it in place would alter a
+// value it was handed.
+func cited(evidence map[string]string, prev *record) map[string]string {
+	out := make(map[string]string, len(evidence)+1)
+	for k, v := range evidence {
+		out[k] = v
+	}
+	cites := prev.ID + " refused with " + prev.Refusal.Code
+	if prev.Refusal.Where != "" {
+		cites += " at " + prev.Refusal.Where
+	}
+	out["refuse:again"] = cites + " on " + prev.CreatedAt
+	return out
 }
 
 // SetLedger attaches the run's event stream, which Refuse appends its event to.
