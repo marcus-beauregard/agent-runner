@@ -31,6 +31,7 @@ const (
 	CLAUnsigned           Code = "cla-unsigned"           // the task needs a CLA nobody signed
 	AgentsForbidden       Code = "agents-forbidden"       // CONTRIBUTING forbids unattended agents
 	DependencyUnavailable Code = "dependency-unavailable" // a source off the fetch list
+	ManagerUnavailable    Code = "manager-unavailable"    // a package manager the deps stage cannot run
 	GateUnavailable       Code = "gate-unavailable"       // a program the gate called could not run
 	OutsideWriteScope     Code = "outside-write-scope"    // the diff would leave the write scope
 	OutsideRunDir         Code = "outside-run-dir"        // a command wrote outside the run directory
@@ -58,6 +59,7 @@ var all = []Code{
 	CLAUnsigned,
 	AgentsForbidden,
 	DependencyUnavailable,
+	ManagerUnavailable,
 	GateUnavailable,
 	OutsideWriteScope,
 	OutsideRunDir,
