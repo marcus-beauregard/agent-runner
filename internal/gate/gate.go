@@ -153,8 +153,10 @@ func (w *tailWriter) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 	w.kept = append(w.kept, p...)
 	if over := len(w.kept) - tailBytes; over > 0 {
-		// Cut at the next newline rather than mid-line: a tail that began with
-		// the second half of a line would read as output the gate never wrote.
+		// Cut at the next newline when the window holds one: a tail that began
+		// with the second half of a line would read as output the gate never
+		// wrote. A single line longer than the window has no newline to cut at,
+		// so it is cut where the window starts.
 		if next := bytes.IndexByte(w.kept[over:], '\n'); next >= 0 {
 			over += next + 1
 		}
