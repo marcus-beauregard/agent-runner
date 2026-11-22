@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,5 +179,91 @@ func TestGCCommandRejectsNonsense(t *testing.T) {
 	}
 	if !strings.Contains(msg, "more than the") {
 		t.Errorf("the refusal does not say what the bound is: %q", msg)
+	}
+}
+
+// TestGCCommandListsRunCheckouts is the worktree tier through the command: both
+// records appear, only the old one is a candidate, and the dry run takes
+// nothing. The records are written by hand because the tier reads the record,
+// not the run that wrote it.
+func TestGCCommandListsRunCheckouts(t *testing.T) {
+	state := stateDir(t)
+	runs := filepath.Join(state, "agent-runner", "runs")
+	const oldID, runningID = "20260101-000000.000001-aaaaaa", "20260101-000000.000002-bbbbbb"
+	for _, r := range []struct{ id, state string }{
+		{oldID, "done"},
+		{runningID, "running"},
+	} {
+		dir := filepath.Join(runs, r.id)
+		if err := os.MkdirAll(filepath.Join(dir, "worktree"), 0o700); err != nil {
+			t.Fatalf("make the run directory: %v", err)
+		}
+		body := fmt.Sprintf(`{"id":%q,"created_at":"2026-01-01T00:00:00Z","kind":"build","repo":%q,"state":%q}`, r.id, state, r.state)
+		if err := os.WriteFile(filepath.Join(dir, "run.json"), []byte(body), 0o600); err != nil {
+			t.Fatalf("write run.json: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "worktree", "blob"), make([]byte, 2048), 0o600); err != nil {
+			t.Fatalf("write the checkout's file: %v", err)
+		}
+	}
+
+	out, code := captureStdout(t, func() int { return gcCommand([]string{"--json"}) })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	var report struct {
+		Apply     bool `json:"apply"`
+		Worktrees []struct {
+			ID      string `json:"id"`
+			Bytes   int64  `json:"bytes"`
+			Collect bool   `json:"collect"`
+			Reason  string `json:"reason"`
+		} `json:"worktrees"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("decode --json: %v\n---\n%s", err, out)
+	}
+	if report.Apply || len(report.Worktrees) != 2 {
+		t.Fatalf("report = apply %v, %d checkouts; want a dry run over two", report.Apply, len(report.Worktrees))
+	}
+	seen := map[string]bool{}
+	for _, e := range report.Worktrees {
+		seen[e.ID] = true
+		switch e.ID {
+		case oldID:
+			if !e.Collect || e.Bytes < 2048 {
+				t.Errorf("the old run = collect %v, %d bytes; want a candidate of at least 2048", e.Collect, e.Bytes)
+			}
+		case runningID:
+			if e.Collect {
+				t.Errorf("a resumable run is a candidate: %s", e.Reason)
+			}
+			if !strings.Contains(e.Reason, "no terminal state") {
+				t.Errorf("reason %q does not say the run is resumable", e.Reason)
+			}
+		default:
+			t.Errorf("unexpected run %q in the report", e.ID)
+		}
+	}
+	if !seen[oldID] || !seen[runningID] {
+		t.Errorf("report named %v, want both runs", seen)
+	}
+	if _, err := os.Stat(filepath.Join(runs, oldID, "worktree")); err != nil {
+		t.Errorf("the dry run deleted the checkout: %v", err)
+	}
+}
+
+// TestGCCommandRejectsANegativeWorktreeAge is the second tier's flag surface:
+// a negative age is a typo, and the flag says so rather than collecting
+// everything.
+func TestGCCommandRejectsANegativeWorktreeAge(t *testing.T) {
+	stateDir(t)
+	var code int
+	msg := captureStderr(t, func() { code = gcCommand([]string{"--worktrees", "-1"}) })
+	if code != 1 {
+		t.Errorf("--worktrees -1 = %d, want 1", code)
+	}
+	if !strings.Contains(msg, "cannot be negative") {
+		t.Errorf("the refusal does not name the flag: %q", msg)
 	}
 }
