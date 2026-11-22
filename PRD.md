@@ -151,7 +151,7 @@ The rule: **the run directory is the state, and every stage is idempotent.**
 
 - A stage writes its outputs, then appends `stage.finish` with the output hash.
 - `agent-runner resume <id>` finds the first stage without a `stage.finish` and continues from there.
-- Re-running a completed stage is a no-op, not a repeat of side effects.
+- Re-running a completed stage is a no-op, not a repeat of side effects — except the deps stage, when the patch changed a dependency file and the cache it produced no longer describes the tree the gate will build (§7).
 - Git operations record what they did: branch name and the sha it was created from, the pushed sha, the PR number. A run interrupted after pushing but before opening the PR resumes by opening the PR, not by rebuilding the work.
 
 The worktree lives under the run directory for exactly this reason. `/tmp` does not survive a reboot, so a resume that depends on it is theatre.
@@ -248,9 +248,11 @@ Each stage has one job and one completion criterion. A failed criterion ends the
 
 Stages 1 to 4 spend no model call: two reads, a fetch and a failure you watched happen. They exist so the work starts from a fact rather than a guess, and they run in this order because a red test on a tree that could not resolve is a fact about the machine.
 
+One stage can run twice. If the patch changes a dependency file — `go.mod`, `go.sum`, `package.json` and its lockfile, `Cargo.toml`, `Cargo.lock`, `pyproject.toml`, `uv.lock`, `requirements.txt` — stage 3 is entered again before the gate, because the tree the gate builds is no longer the tree it fetched, and in container mode the gate has no network to fetch it. §5's no-op rule does not cover this: a stage whose inputs moved is not finished, so the second run writes its own `stages/03-deps/deps.json` and supersedes the first. On the ordinary run, where the patch touches no dependency file, the stage runs once and costs what it always did.
+
 ## 8. Pipelines: `resolve` and `amend`
 
-`resolve` answers the pull request. `amend` answers the issue, when a maintainer has said something on it that an open PR does not yet reflect. They are different pipelines because the input is different. Both run `build`'s deps stage before their first gate, and at the same position: stage 3, after the reading and before any patch is written (§6.4). A patch that answers a review can add a dependency, and the failure the deps stage exists to remove — a fetch arriving as a red test — would otherwise survive in two pipelines of three. A review comment names the change it wants; an issue comment can change what the change should be.
+`resolve` answers the pull request. `amend` answers the issue, when a maintainer has said something on it that an open PR does not yet reflect. They are different pipelines because the input is different. Both run `build`'s deps stage before their first gate, and at the same position: stage 3, after the reading and before any patch is written (§6.4). Fetching before the patch is not enough on its own: a patch that answers a review can add a dependency, and the gate that follows it — offline in container mode — would meet a tree its cache does not describe, which is the failure the deps stage exists to remove, arriving as a red test in two pipelines of three. So the stage is entered again after the fix, under §7's rule for a patch that moves a dependency file. A review comment names the change it wants; an issue comment can change what the change should be.
 
 ### `amend`
 
