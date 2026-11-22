@@ -90,7 +90,8 @@ func ParseAction(text string, hasTool func(string) bool) (*Action, bool) {
 }
 
 // Run drives the loop to completion or the step cap. Invalid actions and tool
-// errors are observations, not failures; only a model transport error aborts.
+// errors are observations, not failures; only a model transport error or a
+// typed refusal aborts.
 func Run(ctx context.Context, task string, llm LLM, opts Options, ts Toolset) (Result, error) {
 	maxSteps := opts.MaxSteps
 	if maxSteps <= 0 {
@@ -128,7 +129,14 @@ func Run(ctx context.Context, task string, llm LLM, opts Options, ts Toolset) (R
 			// advice. It is the run's answer to what was asked for, and the
 			// model does not get to talk its way around it, so the loop stops
 			// here and the caller records why.
-			if errors.Is(err, refuse.ErrRefused) {
+			//
+			// The gate is the typed refusal, not the sentinel: main records a
+			// *refuse.Refusal and nothing else, so a bare error wrapping
+			// refuse.ErrRefused would stop the run with no reason to print.
+			// That stays an observation until whoever returns it returns a
+			// refusal the record can carry.
+			var ref *refuse.Refusal
+			if errors.As(err, &ref) {
 				return Result{Steps: step + 1, Transcript: transcript}, err
 			}
 			observation = "ERROR: " + err.Error()

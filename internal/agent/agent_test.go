@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/marcus-beauregard/agent-runner/internal/refuse"
@@ -128,6 +130,36 @@ func TestToolErrorIsAnObservation(t *testing.T) {
 	}
 	if got := res.Transcript[1].Observation; got != "ERROR: exit status 1" {
 		t.Errorf("observation = %q, want the error as text", got)
+	}
+}
+
+// sentinelTools wraps the refusal sentinel the way internal/tools/env.go does:
+// an error that unwraps to refuse.ErrRefused but carries no *refuse.Refusal.
+// The loop has to keep going on it, because the caller records a typed refusal
+// and would have no reason to print for a bare sentinel.
+type sentinelTools struct{ stubTools }
+
+func (sentinelTools) Run(ctx context.Context, name string, args map[string]any) (string, error) {
+	return "", fmt.Errorf("%w: refused", refuse.ErrRefused)
+}
+
+// TestBareSentinelIsAnObservation pins the edge of the gate: only the typed
+// refusal stops the run. A sentinel with nothing to record stays an
+// observation, so exit 3 can never be written without a reason beside it.
+func TestBareSentinelIsAnObservation(t *testing.T) {
+	llm := &seqLLM{replies: []string{`run_command {"command":"ls -1"}`, "DONE"}}
+	res, err := Run(context.Background(), "task", llm, Options{MaxSteps: 10}, sentinelTools{})
+	if err != nil {
+		t.Fatalf("Run error = %v, want the loop to carry on", err)
+	}
+	if !res.Done {
+		t.Error("the loop did not reach DONE after a bare sentinel")
+	}
+	if res.Steps != 2 {
+		t.Errorf("steps = %d, want 2", res.Steps)
+	}
+	if got := res.Transcript[1].Observation; !strings.Contains(got, "refused") {
+		t.Errorf("observation = %q, want the sentinel error as text", got)
 	}
 }
 
