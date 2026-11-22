@@ -59,6 +59,8 @@ func run(args []string) int {
 		return work(ctx, args[1:])
 	case "report":
 		return reportRun(args[1:])
+	case "gc":
+		return gcCommand(args[1:])
 	case "replay":
 		return replayRun(args[1:])
 	default:
@@ -737,6 +739,10 @@ Usage:
   agent-runner replay <run-dir>                                  prove a finished run's action set from its record
                                                                  (needs a World snapshot and an account: a record written by
                                                                  Begin, not one from work --run-dir)
+  agent-runner gc [--apply] [--envs <days>] [--keep <n>] [--json]
+                                                                 collect the environment tier of PRD §6.3; a dry run
+                                                                 unless --apply (the run and worktree tiers are not
+                                                                 implemented yet)
   agent-runner --help                                            show this help
   agent-runner --version                                         print the version
 `)
