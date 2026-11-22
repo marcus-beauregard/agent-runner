@@ -74,6 +74,10 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.IssueClosed, refuse.AlreadyFixed, refuse.ClaimedByOther},
 		},
 		{
+			cause: "the issue is labelled `wontfix`, `needs-discussion` or `invalid`",
+			codes: []refuse.Code{refuse.RefusedByLabel},
+		},
+		{
 			cause: "the task needs a CLA the operator has not signed",
 			codes: []refuse.Code{refuse.CLAUnsigned},
 		},

@@ -28,6 +28,7 @@ const (
 	IssueClosed           Code = "issue-closed"           // the issue is closed
 	AlreadyFixed          Code = "already-fixed"          // a merged PR already fixed it
 	ClaimedByOther        Code = "claimed-by-other"       // someone else is on it
+	RefusedByLabel        Code = "refused-by-label"       // a label says a maintainer stopped it
 	CLAUnsigned           Code = "cla-unsigned"           // the task needs a CLA nobody signed
 	AgentsForbidden       Code = "agents-forbidden"       // CONTRIBUTING forbids unattended agents
 	DependencyUnavailable Code = "dependency-unavailable" // a source off the fetch list
@@ -56,6 +57,7 @@ var all = []Code{
 	IssueClosed,
 	AlreadyFixed,
 	ClaimedByOther,
+	RefusedByLabel,
 	CLAUnsigned,
 	AgentsForbidden,
 	DependencyUnavailable,

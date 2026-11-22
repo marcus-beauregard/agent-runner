@@ -816,7 +816,14 @@ func TestWorkSandboxFlag(t *testing.T) {
 const (
 	ghClosedIssue  = `{"number":27,"title":"Record","state":"CLOSED","assignees":[]}`
 	ghClaimedIssue = `{"number":27,"title":"Record","state":"OPEN","assignees":[{"login":"someone-else"}]}`
-	ghFixedIssue   = `#!/bin/sh
+	// ghLabelledIssue carries one refusal label and one the repo may keep: only
+	// the first is a maintainer's decision, and the second must not appear in the
+	// reason.
+	ghLabelledIssue = `{"number":27,"title":"Record","state":"OPEN","assignees":[],"labels":[{"name":"wontfix"},{"name":"bug"}]}`
+	// ghClosedLabelledIssue is both over and stopped: the earlier row must win, so
+	// the reason stays about the thing a reader checks first.
+	ghClosedLabelledIssue = `{"number":27,"title":"Record","state":"CLOSED","assignees":[],"labels":[{"name":"wontfix"}]}`
+	ghFixedIssue          = `#!/bin/sh
 case "$1 $2" in
 "issue view") printf '%s\n' '{"number":27,"title":"Record","state":"OPEN","assignees":[],"closedByPullRequestsReferences":[{"number":41,"url":"https://example.test/pull/41"}]}' ;;
 "pr view") printf '%s\n' '{"number":41,"state":"MERGED","url":"https://example.test/pull/41"}' ;;
@@ -874,6 +881,20 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 			code:     "already-fixed",
 			reason:   "issue was already fixed by merged PR #41",
 			evidence: map[string]string{"pull_request": "https://example.test/pull/41", "state": "MERGED"},
+		},
+		{
+			name:     "refused by label",
+			path:     map[string]string{"gh": ghScript(ghLabelledIssue, 0)},
+			code:     "refused-by-label",
+			reason:   "issue is labelled wontfix",
+			evidence: map[string]string{"labels": "wontfix"},
+		},
+		{
+			name:     "closed beats a refusal label",
+			path:     map[string]string{"gh": ghScript(ghClosedLabelledIssue, 0)},
+			code:     "issue-closed",
+			reason:   "issue is closed",
+			evidence: map[string]string{"state": "CLOSED"},
 		},
 		{
 			name:     "tool unavailable",

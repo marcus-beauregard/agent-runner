@@ -324,6 +324,7 @@ Exhausting a budget is its own terminal state, not a failure: the run stops, wri
 The worker refuses, with a printed reason, when:
 
 - the issue is closed, already fixed by a merged PR, or claimed by another person;
+- the issue is labelled `wontfix`, `needs-discussion` or `invalid`;
 - the task needs a CLA the operator has not signed;
 - the repo's CONTRIBUTING forbids unattended agents;
 - a declaration names a dependency source outside the registries the deps stage may reach — a private module, a self-hosted git, a registry override;
