@@ -77,10 +77,12 @@ func TestRunReadsWhatTheShellSaid(t *testing.T) {
 			wantUnavailable: true,
 		},
 		{
+			// The refusal is the 127, which every shell gives; the name is
+			// evidence, and only dash words this case as a not-found line.
 			name:            "a program named by path",
 			command:         "./gradlew check",
 			wantExit:        127,
-			wantMissing:     []string{"./gradlew"},
+			wantMissing:     pathMissingName(t, "./gradlew"),
 			wantUnavailable: true,
 		},
 		{
@@ -103,6 +105,17 @@ func TestRunReadsWhatTheShellSaid(t *testing.T) {
 			path:        []string{"tail"},
 			wantExit:    0,
 			wantMissing: []string{"go"},
+		},
+		{
+			// The clause that reads a wrapper's own status as unavailable: the
+			// shell named the program, but the gate did not exit 127. Without
+			// this row, deleting that clause leaves the table green.
+			name:            "a wrapper that reports its own status",
+			command:         `sh -c "cloc ."; exit 2`,
+			path:            []string{"sh"},
+			wantExit:        2,
+			wantMissing:     []string{"cloc"},
+			wantUnavailable: true,
 		},
 		{
 			name:            "a shell that words it differently",
@@ -249,6 +262,23 @@ func TestRunKeepsTheAnswerWhenAChildOutlivesTheGate(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*waitDelay+time.Second {
 		t.Errorf("Run took %v, want the wait delay to end it", elapsed)
 	}
+}
+
+// pathMissingName returns the name this /bin/sh reports for a program given by
+// path, or nothing when it words that case differently. dash says
+// "./gradlew: not found"; bash says "./gradlew: No such file or directory",
+// which is not the shape the finder reads. The 127 is the gate's answer on
+// either shell, so the row must not turn a wording into the contract.
+func pathMissingName(t *testing.T, name string) []string {
+	t.Helper()
+	cmd := exec.Command(shell, "-c", name)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	if strings.Contains(stderr.String(), "not found") {
+		return []string{name}
+	}
+	return nil
 }
 
 // onlyPath returns a PATH holding the named programs and nothing else, so a
