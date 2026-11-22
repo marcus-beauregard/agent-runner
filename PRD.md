@@ -230,6 +230,9 @@ A repo declares what it takes to build and test it, and a run on a machine that 
 - **Shared without contention.** Being read-only — a bind in container mode, no-write bits outside it — one environment serves every run on its digest: no per-run copy of it, and the only per-run preparation is the dependency fetch, which belongs to the run. A reader takes `envs/<digest>.lock` beside the directory, never inside a tree it cannot write, and holds it for the length of one command, never between runs. `gc` will not remove a digest whose lock it cannot take (§6.3), so the only writer and the only deleter cannot meet a run. An environment that is missing or torn when a run starts — an empty declaration excepted, since it has nothing to be torn — is exit `6` before any work, never a run that discovers half a toolchain at the gate.
 - **Provisioning is a person's act, and it is recorded.** `env-init` is the only thing that creates or changes an environment, and what it did is an artifact inside it: `env.json`, plus `env.ndjson` with one line per step. The only other file under `envs/` is the lock a reader takes beside the directory, and `gc` is the only thing that removes one (§6.3). A run reads that record; it never writes it, and no pipeline calls `env-init`. The command plans by default and writes only with `--apply`, and `--apply` is a person's answer after reading the plan: downloading a toolchain is trust a caller cannot hand to the same automation it is asking to be trusted. What may be downloaded is the runner's list, not the declaration's — one pinned release URL per toolchain, its checksum recorded in `env.json` — so a declaration chooses a version, never a source.
 
+- **Two questions, in this order.** The front door asks first whether the declaration is one `env-init` could honour at all, and only then whether a directory exists at its digest. A declaration that names what this section forbids is `4` (§13) — a person changes it, and no retry helps — while `6` is reserved for a declaration that would be honoured and has no environment yet, where the remedy is `env-init` and the same call again. Asked the other way round, the door sends a person to a command that refuses for the same reason it always will, and `4` becomes the one code no pipeline can return.
+
+
 ## 7. Pipeline: `build` (issue to PR)
 
 Each stage has one job and one completion criterion. A failed criterion ends the run with a report. It does not retry into the dark.
@@ -360,7 +363,7 @@ A refusal is a successful run. Stopping costs a maintainer nothing; a confident 
 | 3 | Refused (see §11) |
 | 4 | Needs a human: ambiguous scope, a question only the maintainer can answer, or a declaration `env-init` cannot honour (§6.4) |
 | 5 | Budget exhausted |
-| 6 | Environment not ready: a person runs `env-init`, then retry (§6.4) |
+| 6 | Environment not ready: a declaration that can be honoured has no environment yet — a person runs `env-init`, then retries (§6.4) |
 
 `1` is not `2`. The first named case is a dependency fetch that could not reach its registry (§6.4): no gate ran, so nothing has been said about the patch, and the report names the stage that stopped the run. The second is a patch that moved the declaration past the environment the run holds (§7): the resolver refuses a tree it has no toolchain to build and `deps.json` names the file, so the caller reads a report rather than a `6` no run could carry. It gets no code of its own — every failure leaves the caller the same next step, read the report and try again later, and a seventh code would be one no caller could act on differently from this.
 
