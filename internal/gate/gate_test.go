@@ -103,6 +103,30 @@ func TestMissingNamesOnlyWhatTheHostLacks(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "a quoted assignment is one word",
+			path: []string{"go"},
+			cmd:  "GOFLAGS=\"-mod=vendor -tags ci\" go test ./...",
+			want: nil,
+		},
+		{
+			name: "a path is the shell's to resolve",
+			path: []string{"go"},
+			cmd:  "./gradlew check",
+			want: nil,
+		},
+		{
+			name: "a loop variable is not a program",
+			path: []string{"go"},
+			cmd:  "for f in ./cmd/*; do go vet $f; done",
+			want: nil,
+		},
+		{
+			name: "a timing prefix is not the program",
+			path: []string{"go"},
+			cmd:  "time go test ./...",
+			want: nil,
+		},
+		{
 			name: "two programs missing, in order",
 			path: nil,
 			cmd:  "cloc . && misspell .",

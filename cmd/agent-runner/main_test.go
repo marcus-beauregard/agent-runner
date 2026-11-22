@@ -841,6 +841,7 @@ exit 0
 type refusalCase struct {
 	name     string
 	path     map[string]string // exactly the programs on PATH; nothing means none
+	gate     string            // the gate the plan is told to run; "" means none
 	code     string            // the code in the record, the report and the stream
 	reason   string            // the sentence every reader has to say, exactly
 	evidence map[string]string // key to the value it must hold; "" wants a non-empty one
@@ -882,13 +883,25 @@ func TestWorkRecordsWhyItRefused(t *testing.T) {
 			reason:   "gh CLI is not available",
 			evidence: map[string]string{"error": ""},
 		},
+		{
+			name:     "gate cannot run",
+			path:     map[string]string{"gh": ghStub},
+			gate:     "go vet ./... && cloc .",
+			code:     "gate-unavailable",
+			reason:   "gate cannot run: go, cloc are not on PATH",
+			evidence: map[string]string{"gate": "go vet ./... && cloc .", "missing": "go, cloc"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
 			stubPATH(t, tc.path)
 			ref := "https://example.test/issues/27"
-			if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run"}); code != 3 {
+			args := []string{ref, "--run-dir", base, "--dry-run"}
+			if tc.gate != "" {
+				args = append(args, "--gate", tc.gate)
+			}
+			if code := work(context.Background(), args); code != 3 {
 				t.Fatalf("exit code = %d, want 3", code)
 			}
 			rec := onlyRun(t, base)
@@ -924,33 +937,8 @@ func TestWorkProceedsPastAnUnmergedLinkedPR(t *testing.T) {
 	}
 }
 
-// TestWorkRefusesAGateItCannotRun: the gate is the repo's own command, copied
-// from its CI. When this host lacks a program the gate names, the run refuses
-// with gate-unavailable instead of planning work whose proof cannot exist. The
-// distinction matters at the code a caller sees: a gate that never ran is exit
-// 3, not exit 2, so nobody blames the patch for the machine (PRD §13).
-func TestWorkRefusesAGateItCannotRun(t *testing.T) {
-	base := t.TempDir()
-	stubPATH(t, map[string]string{"gh": ghStub})
-	ref := "https://example.test/issues/27"
-	gate := "go vet ./... && cloc ."
-	if code := work(context.Background(), []string{ref, "--run-dir", base, "--dry-run", "--gate", gate}); code != 3 {
-		t.Fatalf("exit code = %d, want 3", code)
-	}
-	rec := onlyRun(t, base)
-	dir, err := runrec.Locate(base, rec.ID)
-	if err != nil {
-		t.Fatalf("locate run: %v", err)
-	}
-	checkRefusal(t, dir, rec, refusalCase{
-		name:     "gate cannot run",
-		code:     "gate-unavailable",
-		reason:   "gate cannot run: go, cloc are not on PATH",
-		evidence: map[string]string{"gate": gate, "missing": "go, cloc"},
-	})
-}
-
-// TestWorkProceedsWhenTheGateCanRun is the other half: the check is about the
+// TestWorkProceedsWhenTheGateCanRun is the other half of the gate-unavailable
+// row in TestWorkRecordsWhyItRefused: the check is about the
 // host, not the command. A gate whose programs are on PATH is planned normally,
 // whether or not those programs would pass — nothing here runs the gate, and a
 // check that did would be the gate stage wearing a plan's clothes.

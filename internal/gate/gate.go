@@ -21,6 +21,14 @@ var shellWords = map[string]bool{
 	"exec": true, "eval": true, "true": true, "false": true,
 	"if": true, "then": true, "else": true, "elif": true, "fi": true,
 	"for": true, "while": true, "until": true, "do": true, "done": true,
+	"read": true, "shift": true, "local": true, "declare": true,
+	"typeset": true, "readonly": true, "trap": true, "return": true,
+	"break": true, "continue": true, "wait": true, "kill": true,
+	"jobs": true, "bg": true, "fg": true, "hash": true, "type": true,
+	"ulimit": true, "umask": true, "pwd": true, "alias": true,
+	"unalias": true, "let": true, "exit": true, "times": true,
+	"builtin": true, "getopts": true, "pushd": true, "popd": true,
+	"shopt": true, "history": true, "help": true,
 }
 
 // keywords open a command rather than name one; the word after them is the
@@ -28,6 +36,15 @@ var shellWords = map[string]bool{
 var keywords = map[string]bool{
 	"if": true, "then": true, "else": true, "elif": true,
 	"for": true, "while": true, "until": true, "do": true, "!": true,
+	"time": true,
+}
+
+// openers begin a compound command whose next word is a variable or a
+// condition, not a program: "for f in ./cmd/*" is a loop, and refusing it for
+// want of a program called f would stop a gate that runs. The body of every one
+// of these is its own segment, so bailing on the opening word loses nothing.
+var openers = map[string]bool{
+	"for": true, "while": true, "until": true, "select": true,
 }
 
 // Missing returns the programs the gate command names that this host cannot
@@ -104,19 +121,66 @@ func segments(cmd string) []string {
 // program is the word a segment names as its program: leading assignments
 // (CGO_ENABLED=0), keywords and redirections are skipped. It returns "" for a
 // word this package cannot judge — a quoted or substituted name, a subshell, a
-// redirection — because a gate that cannot be read is not a gate that cannot
-// run.
+// redirection, a path — because a gate that cannot be read is not a gate that
+// cannot run.
+//
+// Paths are skipped rather than looked up: "./gradlew" is resolved by the shell
+// against the worktree, and the plan stage has no worktree yet, so a lookup here
+// would answer a question about the operator's cwd. A miss is silent; a false
+// refusal stops a gate that works.
 func program(seg string) string {
-	for _, f := range strings.Fields(seg) {
+	words := words(seg)
+	if len(words) > 0 && openers[words[0]] {
+		return ""
+	}
+	for _, f := range words {
 		if keywords[f] || isAssignment(f) {
 			continue
 		}
-		if !isProgramName(f) {
+		if !isProgramName(f) || strings.ContainsRune(f, '/') {
 			return ""
 		}
 		return f
 	}
 	return ""
+}
+
+// words splits a segment into the words a shell would hand a program, keeping a
+// quoted run together: GOFLAGS="-mod=vendor -tags ci" is one word, so its tail
+// is an argument and not a program called -tags. Quotes stay in the word, so
+// isProgramName can still refuse a name only the shell could produce.
+func words(seg string) []string {
+	var out []string
+	var cur []rune
+	var quote rune
+	started := false
+	flush := func() {
+		if started {
+			out = append(out, string(cur))
+			cur = nil
+			started = false
+		}
+	}
+	for _, r := range seg {
+		switch {
+		case quote != 0:
+			cur = append(cur, r)
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			cur = append(cur, r)
+			started = true
+		case r == ' ' || r == '\t' || r == '\r':
+			flush()
+		default:
+			cur = append(cur, r)
+			started = true
+		}
+	}
+	flush()
+	return out
 }
 
 // isAssignment reports whether f is a leading VAR=value assignment.
