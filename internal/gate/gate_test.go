@@ -1,0 +1,336 @@
+package gate
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestRunReadsWhatTheShellSaid is the table from the issue, measured rather
+// than reasoned about: each row is a real /bin/sh with a PATH that holds only
+// the programs the row allows, and the answer comes back from the shell that
+// ran it. The shapes matter because a reader of the command line got every one
+// of them wrong: an assignment, a reserved word, a guard, a pipe, a fallback.
+func TestRunReadsWhatTheShellSaid(t *testing.T) {
+	cases := []struct {
+		name            string
+		command         string
+		goMod           bool
+		script          bool
+		path            []string
+		wantExit        int
+		wantMissing     []string
+		wantUnavailable bool
+	}{
+		{
+			name:            "a program this host lacks",
+			command:         "go test ./...",
+			wantExit:        127,
+			wantMissing:     []string{"go"},
+			wantUnavailable: true,
+		},
+		{
+			name:            "an assignment in front of the program",
+			command:         "GOFLAGS=\"-mod=vendor -tags ci\" go test ./...",
+			wantExit:        127,
+			wantMissing:     []string{"go"},
+			wantUnavailable: true,
+		},
+		{
+			name:            "a word the shell runs itself",
+			command:         "time -p go test ./...",
+			wantExit:        127,
+			wantMissing:     []string{"time"},
+			wantUnavailable: true,
+		},
+		{
+			name:            "a guard that holds",
+			command:         "if [ -f go.mod ]; then go test; fi",
+			goMod:           true,
+			wantExit:        127,
+			wantMissing:     []string{"go"},
+			wantUnavailable: true,
+		},
+		{
+			name:            "a guard that does not hold",
+			command:         "if [ -f nope ]; then go test; fi",
+			wantExit:        0,
+			wantUnavailable: false,
+		},
+		{
+			name:            "a fallback that swallows the failure",
+			command:         "cloc . || true",
+			wantExit:        0,
+			wantMissing:     []string{"cloc"},
+			wantUnavailable: false,
+		},
+		{
+			name:            "two gates on one line",
+			command:         "go vet ./... && go test ./...",
+			wantExit:        127,
+			wantMissing:     []string{"go"},
+			wantUnavailable: true,
+		},
+		{
+			// The refusal is the 127, which every shell gives; the name is
+			// evidence, and only dash words this case as a not-found line.
+			name:            "a program named by path",
+			command:         "./gradlew check",
+			wantExit:        127,
+			wantMissing:     pathMissingName(t, "./gradlew"),
+			wantUnavailable: true,
+		},
+		{
+			name:            "a program the checkout lost the exec bit on",
+			command:         "./gate.sh",
+			script:          true,
+			wantExit:        126,
+			wantUnavailable: true,
+		},
+		{
+			name:            "a program inside a substitution",
+			command:         "echo \"$(cloc .)\"",
+			wantExit:        0,
+			wantMissing:     []string{"cloc"},
+			wantUnavailable: false,
+		},
+		{
+			name:        "a pipe whose status is not the program's",
+			command:     "go test ./... | tail -1",
+			path:        []string{"tail"},
+			wantExit:    0,
+			wantMissing: []string{"go"},
+		},
+		{
+			// The clause that reads a wrapper's own status as unavailable: the
+			// shell named the program, but the gate did not exit 127. Without
+			// this row, deleting that clause leaves the table green.
+			name:            "a wrapper that reports its own status",
+			command:         `sh -c "cloc ."; exit 2`,
+			path:            []string{"sh"},
+			wantExit:        2,
+			wantMissing:     []string{"cloc"},
+			wantUnavailable: true,
+		},
+		{
+			name:            "a shell that words it differently",
+			command:         "bash -c \"go test ./...\"",
+			path:            []string{"bash"},
+			wantExit:        127,
+			wantMissing:     []string{"go"},
+			wantUnavailable: true,
+		},
+		{
+			// On stderr, where the shell's own line would arrive: written to
+			// stdout this row passed whether or not the matcher had the shape
+			// guard the row exists to prove.
+			name:            "a gate that prints the words itself",
+			command:         "echo \"go: not found\" >&2; exit 1",
+			wantExit:        1,
+			wantUnavailable: false,
+		},
+		{
+			name:            "a gate that writes 127 for its own reasons",
+			command:         "exit 127",
+			wantExit:        127,
+			wantUnavailable: true,
+		},
+		{
+			// The shell did not finish, so it never gave an answer about the
+			// gate: an OOM kill or an operator's signal must not read as the
+			// patch's failure.
+			name:            "a shell killed from outside",
+			command:         "kill -9 $$",
+			wantExit:        -1,
+			wantUnavailable: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.goMod {
+				if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test\n"), 0o600); err != nil {
+					t.Fatalf("write go.mod: %v", err)
+				}
+			}
+			if tc.script {
+				if err := os.WriteFile(filepath.Join(dir, "gate.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+					t.Fatalf("write gate.sh: %v", err)
+				}
+			}
+			t.Setenv("PATH", onlyPath(t, tc.path...))
+			got, err := Run(context.Background(), dir, tc.command)
+			if err != nil {
+				t.Fatalf("run %q: %v", tc.command, err)
+			}
+			if got.Command != tc.command {
+				t.Errorf("command = %q, want the gate as given", got.Command)
+			}
+			if got.Exit != tc.wantExit {
+				t.Errorf("exit = %d, want %d (tail: %q)", got.Exit, tc.wantExit, got.Tail)
+			}
+			if strings.Join(got.Missing, ",") != strings.Join(tc.wantMissing, ",") {
+				t.Errorf("missing = %q, want %q (tail: %q)", got.Missing, tc.wantMissing, got.Tail)
+			}
+			if unavailable := got.Unavailable(); unavailable != tc.wantUnavailable {
+				t.Errorf("unavailable = %v, want %v", unavailable, tc.wantUnavailable)
+			}
+		})
+	}
+}
+
+// TestRunTailIsTheEnd: a gate that prints a log gets its last lines into the
+// record, not its first. A tail that began with the top of the log would send a
+// reader to the part of the output where nothing went wrong.
+func TestRunTailIsTheEnd(t *testing.T) {
+	if _, err := exec.LookPath("seq"); err != nil {
+		t.Skip("seq is not installed here")
+	}
+	t.Setenv("PATH", onlyPath(t, "seq"))
+	got, err := Run(context.Background(), t.TempDir(), "seq 1 200")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	lines := strings.Split(got.Tail, "\n")
+	if len(lines) != tailLines {
+		t.Fatalf("tail has %d lines, want %d", len(lines), tailLines)
+	}
+	if lines[0] != "161" || lines[len(lines)-1] != "200" {
+		t.Errorf("tail runs %q..%q, want the last %d lines, 161..200", lines[0], lines[len(lines)-1], tailLines)
+	}
+}
+
+// TestTailKeepsTheEndOfALongLine: a line longer than the window must not take
+// the window with it. The cut looks for a newline to start on; when the only
+// newline left is the window's last byte, starting there would keep nothing,
+// and the record would claim the gate printed nothing.
+func TestTailKeepsTheEndOfALongLine(t *testing.T) {
+	var w tailWriter
+	if _, err := w.Write([]byte("before\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	long := strings.Repeat("x", 9000) + "\n"
+	if _, err := w.Write([]byte(long)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := w.tail()
+	if got == "" {
+		t.Fatal("tail is empty; a long line must not discard the window")
+	}
+	if strings.Contains(got, "before") {
+		t.Errorf("tail = %.20q..., want only the end of the long line", got)
+	}
+	if !strings.HasSuffix(got, "xxx") {
+		t.Errorf("tail = %.20q..., want the long line's end", got)
+	}
+	if len(got) > tailBytes {
+		t.Errorf("tail has %d bytes, want at most %d", len(got), tailBytes)
+	}
+}
+
+// TestRunGateThatCannotStartIsAnError: the exit code is the gate's answer, so
+// a gate that never started has none. Reporting -1 as if the command had said
+// something would put a refusal's evidence on a shell that was never there.
+func TestRunGateThatCannotStartIsAnError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone")
+	if _, err := Run(context.Background(), missing, "true"); err == nil {
+		t.Fatal("run in a directory that does not exist, want an error")
+	}
+}
+
+// TestRunEndedContextIsAnError: a canceled gate has no answer either, and the
+// caller has to know the difference between a gate that failed and one that was
+// stopped.
+func TestRunEndedContextIsAnError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Run(ctx, t.TempDir(), "true"); err == nil {
+		t.Fatal("run with a canceled context, want an error")
+	}
+}
+
+// TestRunDeadlineReleasesAChildHoldingThePipe: the deadline is the run's
+// ceiling, not a suggestion. A gate that backgrounds a child leaves the pipe
+// open, and without a wait delay Run would block until that child exited —
+// past the deadline, with no answer and no way for the caller to recover.
+func TestRunDeadlineReleasesAChildHoldingThePipe(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is not installed here")
+	}
+	t.Setenv("PATH", onlyPath(t, "sleep"))
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := Run(ctx, t.TempDir(), "sleep 10 & echo started"); err == nil {
+		t.Fatal("run a gate past its deadline, want an error")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want a deadline", err)
+	}
+	// The bound is the deadline plus the wait delay plus room for the
+	// scheduler: a wait delay that crept to seconds fails here rather than
+	// overrunning a budget unnoticed.
+	if elapsed, limit := time.Since(start), 200*time.Millisecond+waitDelay+time.Second; elapsed > limit {
+		t.Errorf("Run took %v after a 200ms deadline, want under %v", elapsed, limit)
+	}
+}
+
+// TestRunKeepsTheAnswerWhenAChildOutlivesTheGate: waitDelay ends the wait for a
+// pipe a background child kept open; it does not turn a gate that ran and
+// passed into one that could not start. The exit code is the answer whether or
+// not the gate cleaned up after itself.
+func TestRunKeepsTheAnswerWhenAChildOutlivesTheGate(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is not installed here")
+	}
+	t.Setenv("PATH", onlyPath(t, "sleep"))
+	start := time.Now()
+	got, err := Run(context.Background(), t.TempDir(), "sleep 30 & true")
+	if err != nil {
+		t.Fatalf("run a gate that left a child behind: %v", err)
+	}
+	if got.Exit != 0 {
+		t.Errorf("exit = %d, want the shell's 0", got.Exit)
+	}
+	if elapsed := time.Since(start); elapsed > 2*waitDelay+time.Second {
+		t.Errorf("Run took %v, want the wait delay to end it", elapsed)
+	}
+}
+
+// pathMissingName returns the name this /bin/sh reports for a program given by
+// path, or nothing when it words that case differently. dash says
+// "./gradlew: not found"; bash says "./gradlew: No such file or directory",
+// which is not the shape the finder reads. The 127 is the gate's answer on
+// either shell, so the row must not turn a wording into the contract.
+func pathMissingName(t *testing.T, name string) []string {
+	t.Helper()
+	cmd := exec.Command(shell, "-c", name)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	if strings.Contains(stderr.String(), "not found") {
+		return []string{name}
+	}
+	return nil
+}
+
+// onlyPath returns a PATH holding the named programs and nothing else, so a
+// gate in the test finds exactly what the case allows it to find.
+func onlyPath(t *testing.T, names ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range names {
+		real, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s is not installed here", name)
+		}
+		if err := os.Symlink(real, filepath.Join(dir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+	return dir
+}
