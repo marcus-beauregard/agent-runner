@@ -82,6 +82,10 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.AgentsForbidden},
 		},
 		{
+			cause: "a declared dependency resolves outside the registries the runner fetches — a private module, a git or path dependency, a registry override",
+			codes: []refuse.Code{refuse.DependencyUnavailable},
+		},
+		{
 			cause: "the gate runs, but the shell could not run a program it calls — 127 for absent, 126 for not executable — and the record keeps what the shell said",
 			codes: []refuse.Code{refuse.GateUnavailable},
 		},
