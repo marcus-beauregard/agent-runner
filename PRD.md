@@ -44,7 +44,7 @@ agent-runner env-check [--repo <path>] [--json]
 agent-runner env-init  [--repo <path>] [--apply] [--json]
 ```
 
-`env-check` answers whether the environment this repo declares is present and intact. `env-init` builds it, printing the plan unless `--apply` is passed. Neither touches a thread: they answer for the machine, and §6.4 is the contract.
+`env-check` answers whether the environment this repo declares is present and intact. `env-init` builds it, printing the plan unless `--apply` is passed — a person's command, never a pipeline step. Neither touches a thread: they answer for the machine, and §6.4 is the contract.
 
 They are separate commands because a pipeline that installs a toolchain is a pipeline that changes the host, which is the one thing §6.2 forbids a run to do. And because "this machine cannot run this repo" has to arrive at the front door — `env-check` before any work, exit `6` (§13) — instead of at the gate, after the work, looking like a patch that broke the tests.
 
@@ -209,12 +209,12 @@ Rules it will not break:
 
 A repo declares what it takes to build and test it, and a run on a machine that cannot execute that declaration produces nothing worth reviewing. So the environment is an input, handled like the worktree: named, recorded, and prepared before the run rather than improvised inside it.
 
-- **Declared, not discovered.** The declaration is what the repo already says — `go.mod`'s go directive, `package.json`'s engines, package manager and lockfile, `rust-toolchain.toml`, `.python-version` or `requires-python`, the base image a `Dockerfile` names — plus an optional `agent-runner.env.toml` for what those cannot express: system packages, services, environment variables. Each entry keeps the file that justified it, so `env-init` can say why it wants to install something. A repo that declares nothing has an empty declaration and a digest, not an error: there is nothing to verify, so `env-check` is satisfied and `env-init` plans nothing. The gate is then the only thing that can tell that host from a provisioned one.
+- **Declared, not discovered.** The declaration is what the repo already says — `go.mod`'s go directive, `package.json`'s engines, package manager and lockfile, `rust-toolchain.toml`, `.python-version` or `requires-python` — plus an optional `agent-runner.env.toml` for what those cannot express: a toolchain version a file does not pin exactly, and the non-secret variables the build needs. It may not name system packages, services, or a `Dockerfile` base image: a base image is not `bin/`, `lib/` and `share/`, a package in the system store is the install §6.2 forbids, and a service contradicts a tool with nothing that stays running (§3). `env-init` builds nothing from such a declaration and exits `4` (§13): the declaration is a person's to change, not the runner's to reinterpret. Each entry keeps the file that justified it, so `env-init` can say why it wants to install something. A repo that declares nothing has an empty declaration and a digest, not an error: there is nothing to verify, so `env-check` is satisfied and `env-init` plans nothing. The gate is then the only thing that can tell that host from a provisioned one.
 - **A digest names it.** The digest is a hash over the normalised declaration and the bytes of the declaring files: an edit that changes nothing that matters leaves it alone, a version bump changes it. The decision is a comparison, not a judgement — `env-check` asks whether the directory at that digest exists and is intact, and a run records the digest it was bound to.
 - **It lives in the state dir, and nothing enters the host.** `${XDG_STATE_HOME:-~/.local/state}/agent-runner/envs/<digest>/` holds `env.json` (the declaration, the resolved tools and versions, sizes, when it was built), `bin/`, `lib/` and `share/`. Every tool in it was installed inside that directory — `PATH` and each ecosystem's install prefix point into it, and `env-init` is what put them there — never into `$HOME`, `/usr/local` or the system package manager. It is built in a temporary sibling and renamed on success, as the run record is, so a failed init leaves no half-environment that `env-check` could accept.
 - **Read-only in the run.** `--sandbox container` binds `envs/<digest>` read-only at `/opt/env` and puts `/opt/env/bin` first on `PATH`. `--sandbox worktree` gets the same `PATH` prefix and no bind; what holds there is the no-write bits `env-init` left on the directory, and the record says so, which is the honesty §6.1 already applies to the diff. Either way the run's `TMPDIR` stays inside the run, and so does every writable cache a tool insists on — `GOCACHE`, cargo's cache, the npm cache — because Go, cargo and npx all write at build time, and a shared tree they can write to is a tree one run can poison for the next. A cold cache per run is the price of that. `run.json` gains `env_digest`, so a run names its environment the way it names its branch and base sha.
 - **Shared without contention.** Being read-only — a bind in container mode, no-write bits outside it — one environment serves every run on its digest: no per-run copy, no warm-up step. A reader takes `envs/<digest>.lock` beside the directory, never inside a tree it cannot write, and holds it for the length of one command, never between runs. `gc` will not remove a digest whose lock it cannot take (§6.3), so the only writer and the only deleter cannot meet a run. An environment that is missing or torn when a run starts is exit `6` before any work, never a run that discovers half a toolchain at the gate.
-- **Provisioning is a command, and it is recorded.** `env-init` is the only thing that writes under `envs/`, and what it did is an artifact inside the environment: `env.json`, plus `env.ndjson` with one line per step. A run reads that record; it never writes it. The trust it asks for, downloading a toolchain and choosing its source, is why it is a command someone ran with a plan to read first, and not a side effect of a pipeline.
+- **Provisioning is a person's act, and it is recorded.** `env-init` is the only thing that writes under `envs/`, and what it did is an artifact inside the environment: `env.json`, plus `env.ndjson` with one line per step. A run reads that record; it never writes it, and no pipeline calls `env-init`. The command plans by default and writes only with `--apply`, and `--apply` is a person's answer after reading the plan: downloading a toolchain is trust a caller cannot hand to the same automation it is asking to be trusted. What may be downloaded is the runner's list, not the declaration's — one pinned release URL per toolchain, its checksum recorded in `env.json` — so a declaration chooses a version, never a source.
 
 ## 7. Pipeline: `build` (issue to PR)
 
@@ -309,7 +309,7 @@ The worker refuses, with a printed reason, when:
 - a thread's PR was closed without merging, and the next step would be a replacement PR.
 - the route implies `--force` and the pipeline's preconditions do not hold.
 
-A missing *environment* is not one of these. It is exit `6` at the front door (§6.4), before the run starts: the answer is `env-init`, not a different subject, and §13 keeps the two codes apart. A test that can only pass with the open internet is a red test here, exit `2`: the network is closed, so what the run observes is a failing gate, not a request to an off-allowlist host.
+A missing *environment* is not one of these. It is exit `6` at the front door (§6.4), before the run starts: the answer is `env-init` run by a person, not a different subject, and §13 keeps the two codes apart. A test that can only pass with the open internet is a red test here, exit `2`: the network is closed, so what the run observes is a failing gate, not a request to an off-allowlist host.
 
 A refusal is a successful run. Stopping costs a maintainer nothing; a confident wrong PR costs them a review.
 
@@ -334,11 +334,11 @@ A refusal is a successful run. Stopping costs a maintainer nothing; a confident 
 | 0 | Done: PR opened, or nothing left actionable |
 | 2 | Gate failed |
 | 3 | Refused (see §11) |
-| 4 | Needs a human: ambiguous scope, a question only the maintainer can answer |
+| 4 | Needs a human: ambiguous scope, a question only the maintainer can answer, or a declaration `env-init` cannot honour (§6.4) |
 | 5 | Budget exhausted |
-| 6 | Environment not ready: run `env-init`, then retry (§6.4) |
+| 6 | Environment not ready: a person runs `env-init`, then retry (§6.4) |
 
-`6` is not `3`. A caller that sees `3` changes the subject; a caller that sees `6` provisions the environment and calls the same command again with the same arguments. Two codes whose next step differs that much cannot be one code.
+`6` is not `3`. A caller that sees `3` changes the subject; a caller that sees `6` stops and tells a person, who provisions the environment and lets the same command be called again with the same arguments. Provisioning is never the caller's next step. Two codes whose next step differs that much cannot be one code.
 
 A command that ends at `6` writes no run: there is nothing to record yet, and `--json` carries the repo, the digest and what is missing (§4) instead of a run id.
 
