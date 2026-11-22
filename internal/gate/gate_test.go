@@ -113,8 +113,11 @@ func TestRunReadsWhatTheShellSaid(t *testing.T) {
 			wantUnavailable: true,
 		},
 		{
+			// On stderr, where the shell's own line would arrive: written to
+			// stdout this row passed whether or not the matcher had the shape
+			// guard the row exists to prove.
 			name:            "a gate that prints the words itself",
-			command:         "echo \"go: not found\"; exit 1",
+			command:         "echo \"go: not found\" >&2; exit 1",
 			wantExit:        1,
 			wantUnavailable: false,
 		},
