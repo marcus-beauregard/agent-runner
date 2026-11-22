@@ -3,40 +3,29 @@
 // not have is a refusal (PRD §11), not a failed gate (PRD §13): the code was
 // never given the chance to be wrong, and saying the tests failed would blame
 // the patch for the machine.
+//
+// The question is put to the shell that runs the gate, not to a list of names
+// kept here: mapfile is a builtin in bash and not in dash, and only the
+// interpreter knows which one it is.
 package gate
 
 import (
+	"errors"
 	"os/exec"
 	"strings"
 )
 
-// shellWords are the words a shell runs itself, so a segment that starts with
-// one of them needs no program on PATH. Keywords are here because a gate may be
-// a short shell fragment: "if go test ./...; then ... fi" is a command line a
-// maintainer copied from CI, not a program.
-var shellWords = map[string]bool{
-	"test": true, "[": true, "[[": true, ":": true, ".": true,
-	"cd": true, "echo": true, "printf": true, "export": true,
-	"set": true, "unset": true, "source": true, "command": true,
-	"exec": true, "eval": true, "true": true, "false": true,
-	"if": true, "then": true, "else": true, "elif": true, "fi": true,
-	"for": true, "while": true, "until": true, "do": true, "done": true,
-	"read": true, "shift": true, "local": true, "declare": true,
-	"typeset": true, "readonly": true, "trap": true, "return": true,
-	"break": true, "continue": true, "wait": true, "kill": true,
-	"jobs": true, "bg": true, "fg": true, "hash": true, "type": true,
-	"ulimit": true, "umask": true, "pwd": true, "alias": true,
-	"unalias": true, "let": true, "exit": true, "times": true,
-	"builtin": true, "getopts": true, "pushd": true, "popd": true,
-	"shopt": true, "history": true, "help": true,
-}
+// shell is the interpreter a gate runs under. It is an absolute path because
+// the caller's PATH is the thing being questioned.
+const shell = "/bin/sh"
 
 // keywords open a command rather than name one; the word after them is the
-// program, so "if go test" is a check on go.
+// program, so "if go test" is a check on go. "function" is here for the
+// definition itself: the name it defines is not a program until it is called.
 var keywords = map[string]bool{
 	"if": true, "then": true, "else": true, "elif": true,
 	"for": true, "while": true, "until": true, "do": true, "!": true,
-	"time": true,
+	"time": true, "function": true,
 }
 
 // openers begin a compound command whose next word is a variable or a
@@ -49,27 +38,66 @@ var openers = map[string]bool{
 }
 
 // Missing returns the programs the gate command names that this host cannot
-// find, in the order they appear and without repeats.
+// run, in the order they appear and without repeats.
 //
 // It reads the first word of each command segment, which is where a shell looks
-// for a program, and it deliberately does not unravel quoting or substitution:
-// a program hidden inside "$(...)" is not one the gate can be refused for, and
-// guessing there would refuse a gate that runs fine. A miss is silent; a false
-// refusal is not.
+// for a program, and asks the shell whether it can resolve that word. It
+// deliberately does not unravel quoting or substitution: a program hidden
+// inside "$(...)" is not one the gate can be refused for, and guessing there
+// would refuse a gate that runs fine.
+//
+// Two things it does not see, both by design, because the cost of a wrong
+// refusal is a run that never starts: a program behind a wrapper ("timeout 300
+// go test" is a miss, not a refusal), and a path such as "./gradlew", which the
+// shell resolves against a worktree that does not exist yet. A miss is silent;
+// a false refusal is not.
 func Missing(cmd string) []string {
 	var missing []string
 	seen := map[string]bool{}
 	for _, seg := range segments(cmd) {
+		if definesFunction(seg) {
+			return nil // a gate that defines its own commands cannot be judged from its words
+		}
 		prog := program(seg)
-		if prog == "" || shellWords[prog] || seen[prog] {
+		if prog == "" || seen[prog] {
 			continue
 		}
 		seen[prog] = true
-		if _, err := exec.LookPath(prog); err != nil {
+		if !resolvable(prog) {
 			missing = append(missing, prog)
 		}
 	}
 	return missing
+}
+
+// resolvable asks the gate's own shell whether it can resolve one word: a
+// program on PATH or a builtin. A builtin is found here and nowhere else —
+// ulimit exists only because the shell has it — and a subprocess is the
+// cheapest honest answer. The word is passed as an argument, never into the
+// script text.
+func resolvable(prog string) bool {
+	err := exec.Command(shell, "-c", `command -v -- "$1" >/dev/null 2>&1`, "sh", prog).Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return false // the shell looked and did not find it
+	}
+	return true // resolved, or the shell could not be asked: never refuse on a guess
+}
+
+// definesFunction reports whether a segment defines a shell function, as in
+// "ci() { go test ./...; }". The name is a program only after the definition
+// has run, so a gate that defines one is not a gate this package can read, and
+// a call to it later in the same line would look like a missing program.
+func definesFunction(seg string) bool {
+	open := strings.IndexByte(seg, '(')
+	if open <= 0 {
+		return false
+	}
+	if !strings.HasPrefix(strings.TrimSpace(seg[open+1:]), ")") {
+		return false
+	}
+	name := strings.TrimSpace(seg[:open])
+	return name != "" && !strings.ContainsAny(name, " \t") && isProgramName(name)
 }
 
 // segments splits a command line where a shell starts a new command: a newline,

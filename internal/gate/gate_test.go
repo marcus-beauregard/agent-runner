@@ -145,6 +145,18 @@ func TestMissingNamesOnlyWhatTheHostLacks(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "a gate that defines a function is not judged",
+			path: nil,
+			cmd:  "ci() { go test ./...; }; ci",
+			want: nil,
+		},
+		{
+			name: "a program behind a wrapper is a miss",
+			path: []string{"timeout"},
+			cmd:  "timeout 300 go test ./...",
+			want: nil,
+		},
+		{
 			name: "two programs missing, in order",
 			path: nil,
 			cmd:  "cloc . && misspell .",
