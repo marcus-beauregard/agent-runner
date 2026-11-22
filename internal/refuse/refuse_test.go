@@ -82,7 +82,7 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 			codes: []refuse.Code{refuse.AgentsForbidden},
 		},
 		{
-			cause: "a declared dependency resolves outside the registries the runner fetches — a private module, a git or path dependency, a registry override",
+			cause: "a declared dependency resolves outside the registries stage 4 may reach — a private module, a self-hosted git, a registry override",
 			codes: []refuse.Code{refuse.DependencyUnavailable},
 		},
 		{
@@ -134,6 +134,29 @@ func TestVocabularyCoversEveryCauseInThePRD(t *testing.T) {
 		}
 		if !covered {
 			t.Errorf("§11 cause %q has no code in this mapping", cause)
+		}
+	}
+
+	// The other direction, which the loop above cannot see: a code in the
+	// vocabulary with no cause behind it is a code nobody can raise on purpose.
+	// The two below are the documented exceptions — causes the binary produces
+	// that §11 does not name — and anything else has to earn a §11 bullet.
+	unmapped := map[refuse.Code]string{
+		refuse.ToolUnavailable:    "a plan-stage need this host cannot meet (§6.4's missing environment is exit 6, not this)",
+		refuse.SandboxUnavailable: "a container sandbox asked for on a host that cannot build one (§6.2)",
+	}
+	mapped := make(map[refuse.Code]bool, len(mapping))
+	for _, row := range mapping {
+		for _, code := range row.codes {
+			mapped[code] = true
+		}
+	}
+	for _, code := range refuse.Codes() {
+		if mapped[code] {
+			continue
+		}
+		if _, ok := unmapped[code]; !ok {
+			t.Errorf("code %q is in the vocabulary but has no §11 cause and no documented exception", code)
 		}
 	}
 }
